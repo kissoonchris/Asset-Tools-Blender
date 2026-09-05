@@ -1,0 +1,249 @@
+From da03bfe4bf1d4c39410f04dd0b631a63495dfed4 Mon Sep 17 00:00:00 2001
+From: JSRF Native <jsrf-native@local>
+Date: Sat, 5 Sep 2026 21:13:50 +0000
+Subject: [PATCH] Recover retail static stage contact query
+
+---
+ src/stage_runtime.cpp        | 114 +++++++++++++++++++++++++++++++++++
+ src/stage_runtime.h          |  29 +++++++++
+ tests/test_stage_runtime.cpp |  50 +++++++++++++++
+ 3 files changed, 193 insertions(+)
+
+diff --git a/src/stage_runtime.cpp b/src/stage_runtime.cpp
+index ff1bb1b..298695d 100644
+--- a/src/stage_runtime.cpp
++++ b/src/stage_runtime.cpp
+@@ -229,6 +229,120 @@ std::vector<std::size_t> findGrindCandidates(const StageRuntime& stage, const Aa
+     return result;
+ }
+ 
++std::vector<StageCollisionCandidate> findStageCollisionCandidates(
++    const StageRuntime& stage,
++    const Aabb& query,
++    std::uint32_t surfaceMask) {
++    std::vector<StageCollisionCandidate> out;
++    const std::uint16_t lowMask = static_cast<std::uint16_t>(surfaceMask & 0xffffu);
++    if (lowMask == 0u) return out;
++
++    for (std::size_t modelIndex = 0; modelIndex < stage.collisionModels.size(); ++modelIndex) {
++        const auto& model = stage.collisionModels[modelIndex];
++        for (std::size_t triangleIndex = 0; triangleIndex < model.triangles.size(); ++triangleIndex) {
++            const auto& tri = model.triangles[triangleIndex];
++            if ((tri.surfaceProperties & lowMask) == 0u) continue;
++            if (tri.index0 >= model.worldVertices.size() ||
++                tri.index1 >= model.worldVertices.size() ||
++                tri.index2 >= model.worldVertices.size()) {
++                continue;
++            }
++            const Vec3 a = model.worldVertices[tri.index0];
++            const Vec3 b = model.worldVertices[tri.index1];
++            const Vec3 c = model.worldVertices[tri.index2];
++            const Aabb triBounds{
++                {std::min({a.x, b.x, c.x}), std::min({a.y, b.y, c.y}), std::min({a.z, b.z, c.z})},
++                {std::max({a.x, b.x, c.x}), std::max({a.y, b.y, c.y}), std::max({a.z, b.z, c.z})}};
++            if (overlaps(query, triBounds)) out.push_back({modelIndex, triangleIndex});
++        }
++    }
++    return out;
++}
++
++std::optional<StageSegmentContact> findClosestStageSegmentContact(
++    const StageRuntime& stage,
++    std::span<const StageCollisionCandidate> candidates,
++    Vec3 start,
++    Vec3 end,
++    std::uint32_t surfaceMask) {
++    const Vec3 delta = sub(end, start);
++    const float segmentLength2 = lengthSquared(delta);
++    if (segmentLength2 <= 1.0e-20f) return std::nullopt;
++
++    const std::uint16_t lowMask = static_cast<std::uint16_t>(surfaceMask & 0xffffu);
++    if (lowMask == 0u) return std::nullopt;
++
++    const Aabb segmentBounds = normalizedAabb(start, end);
++    std::optional<StageSegmentContact> best;
++    float bestDistance = std::numeric_limits<float>::infinity();
++
++    for (const auto candidate : candidates) {
++        if (candidate.modelIndex >= stage.collisionModels.size()) continue;
++        const auto& model = stage.collisionModels[candidate.modelIndex];
++        if (candidate.triangleIndex >= model.triangles.size()) continue;
++        const auto& tri = model.triangles[candidate.triangleIndex];
++        if ((tri.surfaceProperties & lowMask) == 0u) continue;
++        if (tri.index0 >= model.worldVertices.size() ||
++            tri.index1 >= model.worldVertices.size() ||
++            tri.index2 >= model.worldVertices.size()) {
++            continue;
++        }
++
++        const Vec3 a = model.worldVertices[tri.index0];
++        const Vec3 b = model.worldVertices[tri.index1];
++        const Vec3 c = model.worldVertices[tri.index2];
++        const Aabb triBounds{
++            {std::min({a.x, b.x, c.x}), std::min({a.y, b.y, c.y}), std::min({a.z, b.z, c.z})},
++            {std::max({a.x, b.x, c.x}), std::max({a.y, b.y, c.y}), std::max({a.z, b.z, c.z})}};
++        if (!overlaps(segmentBounds, triBounds)) continue;
++
++        // Retail 0x18260 is one-sided: only a segment travelling into the
++        // triangle's authored front face can produce a static-stage contact.
++        const Vec3 unnormalizedNormal{
++            (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y),
++            (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z),
++            (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)};
++        const float normalLength2 = lengthSquared(unnormalizedNormal);
++        if (normalLength2 <= 1.0e-20f) continue;
++        const float denom = dot(unnormalizedNormal, delta);
++        if (denom >= 0.0f) continue;
++
++        const float t = dot(unnormalizedNormal, sub(a, start)) / denom;
++        if (t < 0.0f || t > 1.0f) continue;
++        const Vec3 point = add(start, mul(delta, t));
++
++        // Inclusive point-in-triangle test using the triangle's own winding.
++        auto edgeSide = [&](Vec3 p0, Vec3 p1) {
++            const Vec3 e = sub(p1, p0);
++            const Vec3 q = sub(point, p0);
++            const Vec3 cross{
++                e.y * q.z - e.z * q.y,
++                e.z * q.x - e.x * q.z,
++                e.x * q.y - e.y * q.x};
++            return dot(cross, unnormalizedNormal);
++        };
++        constexpr float kInsideTolerance = -1.0e-5f;
++        if (edgeSide(a, b) < kInsideTolerance ||
++            edgeSide(b, c) < kInsideTolerance ||
++            edgeSide(c, a) < kInsideTolerance) {
++            continue;
++        }
++
++        const float distance = std::sqrt(segmentLength2) * t;
++        if (distance >= bestDistance) continue;
++        bestDistance = distance;
++        best = StageSegmentContact{
++            candidate.modelIndex,
++            candidate.triangleIndex,
++            point,
++            normalized(unnormalizedNormal),
++            tri.surfaceProperties,
++            t,
++            distance};
++    }
++    return best;
++}
++
+ std::optional<GrindAttachPoint> findNearestGrindSegment(const StageRuntime& stage, const Aabb& query, Vec3 point) {
+     const auto candidates = findGrindCandidates(stage, query);
+     std::optional<GrindAttachPoint> best;
+diff --git a/src/stage_runtime.h b/src/stage_runtime.h
+index 1ee78a6..5ceb72d 100644
+--- a/src/stage_runtime.h
++++ b/src/stage_runtime.h
+@@ -77,9 +77,38 @@ struct GrindAttachPoint {
+     float distanceSquared{};
+ };
+ 
++// Stable references into StageRuntime's decoded static collision data.  The retail
++// collision manager expands these into cached 0x108-byte records; keeping model/
++// triangle indices here preserves the same authored triangle without baking in
++// still-unknown cache fields.
++struct StageCollisionCandidate {
++    std::size_t modelIndex{};
++    std::size_t triangleIndex{};
++};
++
++struct StageSegmentContact {
++    std::size_t modelIndex{};
++    std::size_t triangleIndex{};
++    Vec3 point{};
++    Vec3 normal{};
++    std::uint16_t surfaceProperties{};
++    float segmentT{};
++    float distance{};
++};
++
+ [[nodiscard]] StageRuntime parseStageRuntime(std::span<const std::byte> bytes);
+ [[nodiscard]] bool overlaps(const Aabb& a, const Aabb& b) noexcept;
+ [[nodiscard]] std::vector<std::size_t> findGrindCandidates(const StageRuntime& stage, const Aabb& query);
++[[nodiscard]] std::vector<StageCollisionCandidate> findStageCollisionCandidates(
++    const StageRuntime& stage,
++    const Aabb& query,
++    std::uint32_t surfaceMask);
++[[nodiscard]] std::optional<StageSegmentContact> findClosestStageSegmentContact(
++    const StageRuntime& stage,
++    std::span<const StageCollisionCandidate> candidates,
++    Vec3 start,
++    Vec3 end,
++    std::uint32_t surfaceMask);
+ [[nodiscard]] std::optional<GrindAttachPoint> findNearestGrindSegment(
+     const StageRuntime& stage,
+     const Aabb& query,
+diff --git a/tests/test_stage_runtime.cpp b/tests/test_stage_runtime.cpp
+index e392097..07367ee 100644
+--- a/tests/test_stage_runtime.cpp
++++ b/tests/test_stage_runtime.cpp
+@@ -34,6 +34,44 @@ int main() {
+     check(candidates.size() == 1 && candidates[0] == 0,
+           "grind broadphase should search every wrapped 128-unit grid cell overlapped by the acquire AABB");
+ 
++    // Retail CSysColiManager::query path (0x18260) first branch: stage collision candidates
++    // are filtered by the query AABB/surface flags, then a finite one-sided segment/triangle
++    // test produces the nearest contact by start-to-hit distance.
++    jsrf::StageRuntime collisionSynthetic;
++    jsrf::StageCollisionModel floorModel;
++    floorModel.bounds = {{0.0f, 0.0f, 0.0f}, {10.0f, 0.0f, 10.0f}};
++    floorModel.worldVertices = {{0.0f, 0.0f, 0.0f},
++                                {0.0f, 0.0f, 10.0f},
++                                {10.0f, 0.0f, 0.0f}};
++    floorModel.triangles.push_back({0, 1, 2, 1, 0, 1});
++    collisionSynthetic.collisionModels.push_back(floorModel);
++
++    const jsrf::Aabb playerQuery{{-20.0f, -20.0f, -20.0f}, {20.0f, 20.0f, 20.0f}};
++    const auto stageCandidates = jsrf::findStageCollisionCandidates(collisionSynthetic, playerQuery, 0x73ffu);
++    check(stageCandidates.size() == 1,
++          "stage broadphase should preserve the overlapping floor triangle selected by query surface flags");
++    const auto floorHit = jsrf::findClosestStageSegmentContact(
++        collisionSynthetic, stageCandidates, {2.0f, 5.0f, 2.0f}, {2.0f, -5.0f, 2.0f}, 0x3293u);
++    check(floorHit.has_value(), "retail finite stage segment query should hit an authored floor triangle");
++    if (floorHit) {
++        check(near(floorHit->point.x, 2.0f) && near(floorHit->point.y, 0.0f) && near(floorHit->point.z, 2.0f),
++              "stage contact should preserve the plane intersection point");
++        check(near(floorHit->normal.x, 0.0f) && near(floorHit->normal.y, 1.0f) && near(floorHit->normal.z, 0.0f),
++              "stage contact normal should follow retail triangle winding");
++        check(near(floorHit->distance, 5.0f),
++              "stage contact distance should be measured from the segment start");
++        check(floorHit->surfaceProperties == 1u,
++              "stage contact should carry the collision triangle surface-property bits");
++    }
++    const auto backfaceMiss = jsrf::findClosestStageSegmentContact(
++        collisionSynthetic, stageCandidates, {2.0f, -5.0f, 2.0f}, {2.0f, 5.0f, 2.0f}, 0x3293u);
++    check(!backfaceMiss.has_value(),
++          "retail stage segment query should reject movement through the back face of a collision triangle");
++    const auto maskedMiss = jsrf::findClosestStageSegmentContact(
++        collisionSynthetic, stageCandidates, {2.0f, 5.0f, 2.0f}, {2.0f, -5.0f, 2.0f}, 0x0004u);
++    check(!maskedMiss.has_value(),
++          "retail stage segment query should honor the per-cast surface mask independently of broadphase flags");
++
+     const auto attach = jsrf::findNearestGrindSegment(s, acquire, {130.0f, 5.0f, 0.0f});
+     check(attach.has_value(), "nearest grind segment should be found inside the acquisition AABB");
+     if (attach) {
+@@ -75,6 +113,18 @@ int main() {
+                   "collision model basis+translation should transform local vertices into retail world coordinates");
+         }
+ 
++        const jsrf::Aabb originCollisionQuery{{-20.0f, -20.0f, -20.0f}, {20.0f, 20.0f, 20.0f}};
++        const auto originCandidates = jsrf::findStageCollisionCandidates(retail, originCollisionQuery, 0x73ffu);
++        const auto originFloor = jsrf::findClosestStageSegmentContact(
++            retail, originCandidates, {0.0f, 20.0f, 0.0f}, {0.0f, -20.0f, 0.0f}, 0x3293u);
++        check(originFloor.has_value(), "retail Garage origin should have an authored stage collision contact");
++        if (originFloor) {
++            check(near(originFloor->point.y, -9.0f, 0.01f),
++                  "retail Garage origin floor should intersect at its authored Y=-9 collision plane");
++            check(originFloor->surfaceProperties == 1u,
++                  "retail Garage origin collision should be tagged as floor surface property 1");
++        }
++
+         const jsrf::Aabb garageAcquire{{-435.0f, -15.0f, -165.0f}, {-333.0f, 25.0f, -95.0f}};
+         const auto garageCandidates = jsrf::findGrindCandidates(retail, garageAcquire);
+         check(!garageCandidates.empty(), "retail Garage rail query should return authored candidates");
+-- 
+2.47.3
