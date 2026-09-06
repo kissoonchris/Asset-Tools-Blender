@@ -1,0 +1,195 @@
+diff --git a/recomp/jsrf_runtime_seeds.json b/recomp/jsrf_runtime_seeds.json
+index 4251185..d34a2b8 100644
+--- a/recomp/jsrf_runtime_seeds.json
++++ b/recomp/jsrf_runtime_seeds.json
+@@ -1,4 +1,16 @@
+ [
++  {
++    "start": "0x00154D70",
++    "note": "Retail vtable-only method at vtable 0x001E0F00 + 0x1C. v9 ABI evidence shows its caller 0x00154E00 returns 12 bytes short, exactly this method's ret 0x0C cleanup. Seed as a real function, not a data-pointer alias."
++  },
++  {
++    "start": "0x00155380",
++    "note": "Retail vtable-only method stored at 0x001E0F18. v9 ABI diagnostics show callee-saved/stack corruption when the alias-generated version runs. Clear standalone boundary at 0x00155380."
++  },
++  {
++    "start": "0x0015A020",
++    "note": "Retail vtable-only method stored at 0x001E13FC. v9 ABI diagnostics show corrupted callee-saved state and ESP. Clear standalone boundary after 0x0015A018 ret 0x0C + padding."
++  },
+   {
+     "start": "0x0018AFB0",
+     "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+diff --git a/research/JSRF_V9_ABI_ROOT_CAUSE.md b/research/JSRF_V9_ABI_ROOT_CAUSE.md
+new file mode 100644
+index 0000000..e058952
+--- /dev/null
++++ b/research/JSRF_V9_ABI_ROOT_CAUSE.md
+@@ -0,0 +1,46 @@
++# JSRF v9 ABI root-cause note
++
++The v9 Windows run reached the same `sub_001579D0` crash, but `RECOMP_ABI_CHECK`
++made the earlier stack damage visible.
++
++## First actionable violation
++
++`sub_00154E00` returned with `ESP 0x00F7FE8C -> 0x00F7FE88`.  The retail body
++pushes `ESI`/`EDI`, invokes the vtable method at slot `+0x1C`, then returns with
++`ret 4`.  On the failing branch that first virtual method is the only callee.
++The missing 12 bytes are therefore exactly the virtual method's retail
++`ret 0x0C` argument cleanup.
++
++The object is a JSRF interface whose vtable begins at `0x001E0F00`; slot `+0x1C`
++is the retail function `0x00154D70`.  That function is vtable-only, has no
++standard frame prologue, starts cleanly after the preceding `ret`/padding, and
++all of its retail exits use `ret 0x0C`.
++
++## Same detector shape elsewhere
++
++Two later ABI failures have the same vtable-only/non-prologue shape:
++
++- `0x00155380`, stored at `0x001E0F18`.
++- `0x0015A020`, stored at `0x001E13FC`.
++
++Both are clear standalone retail functions separated from their predecessors by
++`ret` plus padding, yet neither has a standard `push ebp; mov ebp, esp`
++prologue.  The generic data-pointer recovery can materialize this shape as an
++alias after function boundaries are already fixed.  v9 shows those alias-built
++entries returning with corrupted callee-saved state/ESP.
++
++## Bring-up fix
++
++Seed those three proven retail entries before function construction:
++
++- `0x00154D70`
++- `0x00155380`
++- `0x0015A020`
++
++This is not a gameplay or behavior override.  It changes only the static
++function-boundary input so xboxrecomp lifts the original retail bodies with
++their own epilogues/`ret N` cleanup.
++
++The tester also captures the generated C source context named by DbgHelp on a
++future crash, so the next run will preserve the exact lifted statements without
++manual file hunting.
+diff --git a/scripts/Build-JSRF-XboxRecomp.ps1 b/scripts/Build-JSRF-XboxRecomp.ps1
+index f88a35d..8ec148e 100644
+--- a/scripts/Build-JSRF-XboxRecomp.ps1
++++ b/scripts/Build-JSRF-XboxRecomp.ps1
+@@ -16,6 +16,7 @@ $BuildDir = Join-Path $RecompDir "build"
+ $Driver = Join-Path $ProjectRoot "scripts\jsrf_xboxrecomp.py"
+ $RuntimeLog = Join-Path $ProjectRoot "JSRF_RUNTIME_LOG.txt"
+ $StackwalkLog = Join-Path $ProjectRoot "JSRF_STACKWALK_LOG.txt"
++$SourceContextLog = Join-Path $ProjectRoot "JSRF_SOURCE_CONTEXT_LOG.txt"
+ 
+ if ([string]::IsNullOrWhiteSpace($GameDir)) {
+     $GameDir = Join-Path $ProjectRoot "game"
+@@ -133,6 +134,7 @@ if ($Run) {
+ 
+     Remove-Item -LiteralPath $RuntimeLog -Force -ErrorAction SilentlyContinue
+     Remove-Item -LiteralPath $StackwalkLog -Force -ErrorAction SilentlyContinue
++    Remove-Item -LiteralPath $SourceContextLog -Force -ErrorAction SilentlyContinue
+ 
+     Write-Host "Launching native JSRF runtime..."
+     $NativeErrorActionPreference = $ErrorActionPreference
+@@ -156,6 +158,41 @@ if ($Run) {
+             Tee-Object -FilePath $StackwalkLog
+     }
+ 
++    # If DbgHelp named an exact generated C source line, preserve the nearby
++    # lifted statements automatically.  This turns the next crash report into
++    # a source-level diagnosis without asking the user to find generated files.
++    if (Test-Path -LiteralPath $RuntimeLog -PathType Leaf) {
++        $RuntimeText = Get-Content -LiteralPath $RuntimeLog -Raw
++        $SourceMatches = [regex]::Matches(
++            $RuntimeText,
++            'source (?<path>[A-Za-z]:\\[^\r\n]+?\.c):(?<line>\d+)'
++        )
++        $SeenSource = @{}
++        foreach ($SourceMatch in $SourceMatches) {
++            $SourcePath = $SourceMatch.Groups['path'].Value
++            $SourceLine = [int]$SourceMatch.Groups['line'].Value
++            $SourceKey = $SourcePath + ':' + $SourceLine
++            if ($SeenSource.ContainsKey($SourceKey)) { continue }
++            $SeenSource[$SourceKey] = $true
++            if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { continue }
++
++            $SourceLines = @(Get-Content -LiteralPath $SourcePath)
++            $FirstLine = [Math]::Max(1, $SourceLine - 24)
++            $LastLine = [Math]::Min($SourceLines.Count, $SourceLine + 24)
++            Add-Content -LiteralPath $SourceContextLog -Value '================ SOURCE CONTEXT ================'
++            Add-Content -LiteralPath $SourceContextLog -Value (
++                $SourcePath + ':' + $SourceLine + '  lines ' + $FirstLine + '-' + $LastLine
++            )
++            for ($LineNumber = $FirstLine; $LineNumber -le $LastLine; $LineNumber++) {
++                $Marker = if ($LineNumber -eq $SourceLine) { '>>' } else { '  ' }
++                Add-Content -LiteralPath $SourceContextLog -Value (
++                    ('{0} {1,7}: {2}' -f $Marker, $LineNumber, $SourceLines[$LineNumber - 1])
++                )
++            }
++            Add-Content -LiteralPath $SourceContextLog -Value ''
++        }
++    }
++
+     if ($RunExitCode -eq 3) {
+         Write-Host "Native runtime hit the xboxrecomp watchdog diagnostic exit (code 3)."
+     } else {
+diff --git a/scripts/Easy-Test-JSRF.ps1 b/scripts/Easy-Test-JSRF.ps1
+index d97df35..ecf762b 100644
+--- a/scripts/Easy-Test-JSRF.ps1
++++ b/scripts/Easy-Test-JSRF.ps1
+@@ -9,6 +9,7 @@ $LogPath = Join-Path $Root 'JSRF_TEST_LOG.txt'
+ $BuildScript = Join-Path $PSScriptRoot 'Build-JSRF-XboxRecomp.ps1'
+ $RuntimeLog = Join-Path $Root 'JSRF_RUNTIME_LOG.txt'
+ $StackwalkLog = Join-Path $Root 'JSRF_STACKWALK_LOG.txt'
++$SourceContextLog = Join-Path $Root 'JSRF_SOURCE_CONTEXT_LOG.txt'
+ 
+ function Refresh-Path {
+     $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+@@ -116,7 +117,8 @@ function Ensure-VCTools {
+ function Append-NativeDiagnostics {
+     $items = @(
+         @{ Label = 'NATIVE RUNTIME OUTPUT'; Path = $RuntimeLog },
+-        @{ Label = 'DECODED GUEST STACK'; Path = $StackwalkLog }
++        @{ Label = 'DECODED GUEST STACK'; Path = $StackwalkLog },
++        @{ Label = 'GENERATED SOURCE CONTEXT'; Path = $SourceContextLog }
+     )
+     foreach ($item in $items) {
+         if (Test-Path -LiteralPath $item.Path -PathType Leaf) {
+diff --git a/tests/test_easy_test_powershell.py b/tests/test_easy_test_powershell.py
+index 6e475a3..0bdcc2c 100644
+--- a/tests/test_easy_test_powershell.py
++++ b/tests/test_easy_test_powershell.py
+@@ -25,10 +25,14 @@ def test_runtime_diagnostics_are_persisted_for_upload():
+     assert "tools\\stackwalk.py" in build
+     assert "tools\\disasm\\output\\functions.json" in build
+     assert "JSRF_STACKWALK_LOG.txt" in build
++    assert "JSRF_SOURCE_CONTEXT_LOG.txt" in build
++    assert "source (?<path>" in build
++    assert "SOURCE CONTEXT" in build
+ 
+     assert "Append-NativeDiagnostics" in easy
+     assert "JSRF_RUNTIME_LOG.txt" in easy
+     assert "JSRF_STACKWALK_LOG.txt" in easy
++    assert "JSRF_SOURCE_CONTEXT_LOG.txt" in easy
+     assert "Stop-Transcript" in easy
+ 
+ 
+ diff --git a/tests/test_jsrf_xboxrecomp.py b/tests/test_jsrf_xboxrecomp.py
+index 7233f42..00f7cf6 100644
+--- a/tests/test_jsrf_xboxrecomp.py
++++ b/tests/test_jsrf_xboxrecomp.py
+@@ -133,6 +133,14 @@ class RecompProjectStructureTests(unittest.TestCase):
+         self.assertTrue(expected.issubset(starts))
+         self.assertNotIn("0x0017d15c", starts,
+                          "0x0017D15C is a memmove switch-case label, not a function entry")
++        # v9 ABI diagnostics exposed three vtable-only retail entries that the
++        # generic detector was materializing as aliases rather than standalone
++        # functions.  They have unambiguous retail boundaries (padding/ret on
++        # both sides) and must be seeded before function construction so their
++        # stdcall epilogues are preserved.
++        self.assertTrue({
++            "0x00154d70", "0x00155380", "0x0015a020",
++        }.issubset(starts))
+ 
+     def test_manual_functions_pin_retail_memmove(self):
+         root = Path(__file__).resolve().parents[1]
