@@ -15,6 +15,11 @@ New in this checkpoint:
 - `Build-And-Run-Garage-Windows.bat` plus a dedicated one-click Windows build script.
 - Win32 camera orbit (RMB drag or arrows), R restarts the retail rail run, Esc exits.
 
-The patch in this directory is a text backup from checkpoint 02 (`c2228ac`) through this checkpoint, so it is not vulnerable to binary ZIP truncation.
+The source delta from checkpoint 02 (`c2228ac`) is backed up as three UTF-8-safe Base64 parts so it is not vulnerable to the binary ZIP truncation seen in checkpoint 03:
+- `patch.gz.b64.part-00` — SHA-256 `fae07f116fd8943a851039a8a886bb5b0c0d0e2f378b95331a6134cbac7e1a7d`
+- `patch.gz.b64.part-01` — SHA-256 `679361a77d38095b8834451f0264bc577f028def8c0ef7e9e9eb5d5ec8489f42`
+- `patch.gz.b64.part-02` — SHA-256 `e5c1be893f329bc3593ab15e1bdc0789c82086423e70a5399939952da90f2795`
+
+Concatenate the three files in numeric order, Base64-decode the result, then gunzip it to recover `0001-Retail-Garage-playable-slice.patch`. The original patch SHA-256 is `06d8fc14a995dc6b638aacd1fe34186652a1cf307f6ebc88c5b418f3a984a95a`.
 
 Current scope: this is a retail-driven rail/visual milestone, not yet full JSRF locomotion. The old free-movement prototype remains separate and is not being represented as authentic gameplay.
