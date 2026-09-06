@@ -43,7 +43,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $build = Join-Path $env:RUNNER_TEMP 'jsrf-build'
-          cmake -S $env:JSRF_SOURCE -B $build -G 'Visual Studio 17 2022' -A x64
+          cmake -S $env:JSRF_SOURCE -B $build -G 'Visual Studio 18 2026' -A x64
           "JSRF_BUILD=$build" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build JSRF-Garage.exe
