@@ -1,0 +1,74 @@
+diff --git a/recomp/src/recomp_manual.c b/recomp/src/recomp_manual.c
+index 23aeba8..cfe9a16 100644
+--- a/recomp/src/recomp_manual.c
++++ b/recomp/src/recomp_manual.c
+@@ -90,6 +90,55 @@ static void dump_recent_icall_targets(void)
+     }
+ }
+ 
++/*
++ * ABI-check callback required when the generated JSRF sources are compiled
++ * with RECOMP_ABI_CHECK.  The pinned xboxrecomp headers emit calls to this
++ * symbol from generated objects; define it in the host executable so the
++ * diagnostic build cannot fail at link time.
++ */
++void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
++                              uint32_t edi0, uint32_t esp0)
++{
++    enum { SLOT_COUNT = 32 };
++    static uint32_t seen[SLOT_COUNT];
++    static uint64_t hits[SLOT_COUNT];
++    static int count;
++    int i;
++
++    for (i = 0; i < count; ++i) {
++        if (seen[i] == va) {
++            break;
++        }
++    }
++    if (i == count) {
++        if (count == SLOT_COUNT) {
++            return;
++        }
++        seen[count] = va;
++        hits[count] = 0;
++        ++count;
++    }
++
++    ++hits[i];
++    {
++        uint64_t n = hits[i];
++        while (n >= 10 && n % 10 == 0) {
++            n /= 10;
++        }
++        if (n != 1) {
++            return;
++        }
++    }
++
++    fprintf(stderr,
++            "[ABI] target 0x%08X violation #%llu: "
++            "ebx %08X->%08X esi %08X->%08X edi %08X->%08X "
++            "esp %08X->%08X\n",
++            va, (unsigned long long)hits[i],
++            ebx0, g_ebx, esi0, g_esi, edi0, g_edi, esp0, g_esp);
++    fflush(stderr);
++}
++
+ void recomp_icall_fail_log(uint32_t va)
+ {
+     uint32_t ret = current_icall_return_address();
+diff --git a/tests/test_jsrf_xboxrecomp.py b/tests/test_jsrf_xboxrecomp.py
+index 54a04d1..7233f42 100644
+--- a/tests/test_jsrf_xboxrecomp.py
++++ b/tests/test_jsrf_xboxrecomp.py
+@@ -258,6 +258,9 @@ int main(void) {
+         self.assertIn("/DEBUG", cmake)
+         self.assertIn("SymGetLineFromAddr64", main_c)
+         self.assertIn("module base", main_c.lower())
++        manual_c = (root / "recomp" / "src" / "recomp_manual.c").read_text(encoding="utf-8")
++        self.assertIn("void recomp_abi_violation_log", manual_c,
++                      "RECOMP_ABI_CHECK must have a definition in the JSRF host link")
+ 
+     def test_jsrf_host_project_has_retail_boot_invariants(self):
+         root = Path(__file__).resolve().parents[1]
