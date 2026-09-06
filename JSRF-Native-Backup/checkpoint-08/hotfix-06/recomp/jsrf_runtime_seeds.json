@@ -1,0 +1,58 @@
+[
+  {
+    "start": "0x0018AFB0",
+    "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x0018B1A0",
+    "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x0018B390",
+    "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x0018B580",
+    "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x0018B770",
+    "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x0018B960",
+    "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x0018BB50",
+    "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x0018BD40",
+    "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x0018C1D0",
+    "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x0018C3C0",
+    "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x001BDAA9",
+    "note": "Observed unresolved indirect-call target in XPP section in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x0018E410",
+    "note": "Observed unresolved indirect-call target in D3D section in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x001A5299",
+    "note": "Observed unresolved indirect-call target in DSOUND section in JSRF native run 2026-09-06."
+  },
+  {
+    "start": "0x001A52A4",
+    "note": "Observed unresolved indirect-call target in DSOUND section in JSRF native run 2026-09-06."
+  }
+]
