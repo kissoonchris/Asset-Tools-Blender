@@ -1,0 +1,221 @@
+diff --git a/recomp/jsrf_runtime_seeds.json b/recomp/jsrf_runtime_seeds.json
+index 36e8da3..af8e98d 100644
+--- a/recomp/jsrf_runtime_seeds.json
++++ b/recomp/jsrf_runtime_seeds.json
+@@ -91,6 +91,18 @@
+     "start": "0x00161C20",
+     "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
+   },
++  {
++    "start": "0x00168310",
++    "note": "Retail DirectSound root-interface QueryInterface at vtable 0x001E3A70 + 0x00. v22 startup needs IID 588211C6 to return the secondary interface at object+4; this padding-delimited vtable-only entry has no direct-call edge."
++  },
++  {
++    "start": "0x00168400",
++    "note": "Retail DirectSound secondary-interface method at vtable 0x001E3A5C + 0x0C. sub_00116EC0 calls this slot to obtain IID_IDirectSound8 after QueryInterface returns object+4; standalone body ends at 0x00168473."
++  },
++  {
++    "start": "0x00168480",
++    "note": "Retail DirectSound root initialization method at vtable 0x001E3A70 + 0x0C. sub_001680D0 calls this slot after creating the root object; standalone body ends at 0x001684DF."
++  },
+   {
+     "start": "0x00177FE0",
+     "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
+diff --git a/recomp/jsrf_trace_functions.json b/recomp/jsrf_trace_functions.json
+index 279f757..4fcac11 100644
+--- a/recomp/jsrf_trace_functions.json
++++ b/recomp/jsrf_trace_functions.json
+@@ -1,5 +1,18 @@
+ [
++  "0x00012210",
++  "0x00012C10",
++  "0x00013F80",
++  "0x0005F250",
++  "0x0005F2C0",
++  "0x0005F350",
++  "0x0006F9E0",
++  "0x00116EC0",
++  "0x00147532",
+   "0x001497DC",
++  "0x0014ADA3",
++  "0x0014CAA0",
++  "0x0014CAF0",
++  "0x00156DF0",
+   "0x0015FC40",
+   "0x0015FCC0",
+   "0x0015FD40",
+@@ -10,20 +23,10 @@
+   "0x00166660",
+   "0x001666E0",
+   "0x00166760",
+-  "0x0006F9E0",
+-  "0x00012210",
+-  "0x0005F350",
+-  "0x00012C10",
+-  "0x00013F80",
+-  "0x0014CAA0",
+-  "0x001BB690",
+-  "0x0014CAF0",
+-  "0x001BB750",
+-  "0x0005F2C0",
+-  "0x0005F250",
+-  "0x00156DF0",
+   "0x001680D0",
+-  "0x00116EC0",
+-  "0x0014ADA3",
+-  "0x00147532"
++  "0x00168310",
++  "0x00168400",
++  "0x00168480",
++  "0x001BB690",
++  "0x001BB750"
+ ]
+diff --git a/research/JSRF_V22_DSOUND_INTERFACE_BOUNDARY.md b/research/JSRF_V22_DSOUND_INTERFACE_BOUNDARY.md
+new file mode 100644
+index 0000000..05e45f5
+--- /dev/null
++++ b/research/JSRF_V22_DSOUND_INTERFACE_BOUNDARY.md
+@@ -0,0 +1,61 @@
++# JSRF v22 DirectSound interface handoff
++
++## Runtime result
++
++v22 fixed the earlier DirectSound driver failure. The title now enables the MCPX
++APU, reaches `sub_001680D0`, and that routine returns success. Startup then calls
++retail `sub_00116EC0`, which returns `0x800401F1`; the application stores that
++negative status and exits through its normal XAPI reboot path.
++
++The v22 return register is also diagnostic: `sub_00116EC0` returns with
++`ECX=0x001E3A70`. Retail `0x00116EDF` loads ECX from the vtable of the interface
++returned by the first call, so the failing second dispatch used the *primary*
++vtable at `0x001E3A70`.
++
++## Retail object layout
++
++Retail constructor `0x001693E0` installs two adjacent interface vtables:
++
++- object +0x00 -> `0x001E3A70`
++- object +0x04 -> `0x001E3A5C`
++
++The relevant slots are:
++
++- `0x001E3A70 + 0x00 -> 0x00168310` (root QueryInterface-style method)
++- `0x001E3A70 + 0x0C -> 0x00168480` (root initialization method)
++- `0x001E3A5C + 0x0C -> 0x00168400` (secondary-interface method)
++
++`sub_00116EC0` asks the root object for GUID
++`588211C6-F18C-11D2-8D16-00105A6B7166`. In retail `0x00168310`, that exact IID
++returns `this + 4`, whose vtable is `0x001E3A5C`. It then asks that secondary
++interface for `C50A7E93-F395-4834-9EF6-7FA99DE50966` (`IID_IDirectSound8`) via
++slot +0x0C.
++
++The primary slot +0x0C (`0x00168480`) returns `0x800401F1` if object+0x14 is
++already initialized. That is exactly the v22 result and is consistent with the
++second call dispatching through `0x001E3A70` instead of the required secondary
++vtable.
++
++## Boundary evidence
++
++All three relevant methods are vtable-only and have explicit standalone retail
++boundaries separated by alignment padding:
++
++- `0x00168310..0x001683F8`, final `ret 0x0C`, next code at `0x00168400`
++- `0x00168400..0x00168472`, final `ret 0x0C`, next code at `0x00168480`
++- `0x00168480..0x001684DE`, final `ret 0x08`
++
++They have no direct CALL xrefs. This is the same class of boundary evidence as
++earlier JSRF vtable-only fixes: the generic detector can otherwise weaken a
++runtime seed into an alias and preserve the wrong surrounding body/entry
++semantics.
++
++## v23 action
++
++v23 therefore does not force any HRESULT or replace DirectSound behavior. It
++pins these three retail-proven methods as standalone functions, seeds them as
++runtime vtable entries, and adds function-level tracing for the next Windows
++run. If the boundary correction is causal, `sub_00116EC0` should reach the
++secondary slot `0x00168400` and no longer return the primary-interface
++`0x800401F1` state error. If not, the added trace identifies the exact remaining
++translation mismatch without altering guest state.
+diff --git a/scripts/jsrf_xboxrecomp.py b/scripts/jsrf_xboxrecomp.py
+index ca90f76..99832db 100755
+--- a/scripts/jsrf_xboxrecomp.py
++++ b/scripts/jsrf_xboxrecomp.py
+@@ -54,6 +54,21 @@ JSRF_RETAIL_FUNCTION_BOUNDARIES = (
+         "end": 0x00160108,
+         "called_by": 0x0015FC40,
+     },
++    {
++        "start": 0x00168310,
++        "end": 0x001683F9,
++        "called_by": 0x00116EC0,
++    },
++    {
++        "start": 0x00168400,
++        "end": 0x00168473,
++        "called_by": 0x00116EC0,
++    },
++    {
++        "start": 0x00168480,
++        "end": 0x001684DF,
++        "called_by": 0x001680D0,
++    },
+     {
+         "start": 0x00178A00,
+         "end": 0x00178B2B,
+diff --git a/tests/test_v23_dsound_interface_boundaries.py b/tests/test_v23_dsound_interface_boundaries.py
+new file mode 100644
+index 0000000..f6e107f
+--- /dev/null
++++ b/tests/test_v23_dsound_interface_boundaries.py
+@@ -0,0 +1,50 @@
++import json
++from pathlib import Path
++
++
++def root() -> Path:
++    return Path(__file__).resolve().parents[1]
++
++
++def test_v23_seeds_and_traces_retail_dsound_interface_methods():
++    seeds = json.loads((root() / "recomp" / "jsrf_runtime_seeds.json").read_text(encoding="utf-8"))
++    starts = {int(item["start"], 16) for item in seeds}
++    required = {0x00168310, 0x00168400, 0x00168480}
++    assert required.issubset(starts)
++
++    trace = json.loads((root() / "recomp" / "jsrf_trace_functions.json").read_text(encoding="utf-8"))
++    traced = {int(value, 16) if isinstance(value, str) else int(value) for value in trace}
++    assert required.issubset(traced)
++
++
++def test_v23_pins_padding_delimited_dsound_vtable_boundaries(tmp_path):
++    from scripts.jsrf_xboxrecomp import pin_jsrf_function_boundaries
++
++    # Model the generic detector swallowing the three vtable-only entries into
++    # a surrounding body. Retail disassembly proves each is an independent
++    # padding-delimited method. The JSRF post-pass must restore all three.
++    path = tmp_path / "functions.json"
++    path.write_text(json.dumps([
++        {
++            "start": "0x00168260",
++            "end": "0x00168500",
++            "size": 0x2A0,
++            "name": "sub_00168260",
++            "section": ".text",
++            "confidence": 0.7,
++            "detection_method": "generic",
++            "num_instructions": 1,
++            "has_prologue": False,
++            "calls_to": [],
++            "called_by": [],
++        }
++    ]), encoding="utf-8")
++
++    pin_jsrf_function_boundaries(path)
++    funcs = {int(f["start"], 16): f for f in json.loads(path.read_text(encoding="utf-8"))}
++    assert int(funcs[0x00168310]["end"], 16) == 0x001683F9
++    assert int(funcs[0x00168400]["end"], 16) == 0x00168473
++    assert int(funcs[0x00168480]["end"], 16) == 0x001684DF
++    assert funcs[0x00168310]["detection_method"] == "jsrf_retail_boundary"
++    assert funcs[0x00168400]["detection_method"] == "jsrf_retail_boundary"
++    assert funcs[0x00168480]["detection_method"] == "jsrf_retail_boundary"
