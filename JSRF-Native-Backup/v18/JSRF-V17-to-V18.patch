@@ -1,0 +1,413 @@
+--- a/recomp/src/main.c
++++ b/recomp/src/main.c
+@@ -29,6 +29,8 @@
+ 
+ extern void xbe_entry_point(void);
+ extern int recomp_dispatch_init(void);
++extern int xbox_Nv2aMirrorFence(uint32_t device_ptr_va,
++                                uint32_t put_off, uint32_t get_ptr_off);
+ 
+ static BOOL load_xbe(const char *path, void **out_data, size_t *out_size)
+ {
+@@ -206,6 +208,22 @@
+     }
+ 
+     g_xbox_mem_offset = xbox_GetMemoryOffset();
++
++    /*
++     * Retail JSRF D3D keeps its submitted fence count at device+0x30 and a
++     * pointer to the GPU-written completion value at device+0x34. The latter
++     * is a 96-byte contiguous-memory block (0x80000000 in this retail run).
++     * xboxrecomp has no hardware GPU consuming that semaphore, so register the
++     * exact retail chain with its generic NV2A completion mirror. This models
++     * completed submitted work; it does not bypass or replace guest D3D code.
++     */
++    if (xbox_Nv2aMirrorFence(0x0019DCE0u, 0x30u, 0x34u) != 0) {
++        fprintf(stderr, "[BOOT] could not register JSRF NV2A fence mirror\n");
++        xbox_MemoryLayoutShutdown();
++        free(xbe_data);
++        return 1;
++    }
++
+     xbox_kernel_init();
+ 
+     {
+--- a/recomp/src/recomp_manual.c
++++ b/recomp/src/recomp_manual.c
+@@ -64,7 +64,9 @@
+ 
+ static int jsrf_guest_read_u32(uint32_t va, uint32_t *value)
+ {
+-    if (!value || !g_xbox_mem_offset || va < 0x00001000u || va > 0x03FFFFFCu) {
++    int low_ram = (va >= 0x00001000u && va <= 0x03FFFFFCu);
++    int contiguous = (va >= 0x80000000u && va <= 0x83FFFFFCu);
++    if (!value || !g_xbox_mem_offset || (!low_ram && !contiguous)) {
+         return 0;
+     }
+     *value = GUEST_U32(va);
+@@ -159,6 +161,80 @@
+     fflush(stderr);
+ }
+ 
++/*
++ * v18 diagnostic probe for retail D3D wait helper 0x00191440.
++ *
++ * v17 reaches the D3D shutdown chain and spends the watchdog interval without
++ * further kernel calls. Retail 0x001914F0..0x001914F8 is a tight memory poll
++ * waiting for the guest-visible pushbuffer progress value to move. This probe
++ * is deliberately read-only: it snapshots the D3D global/device state and the
++ * progress pointer/value represented by the retail registers.
++ */
++void jsrf_d3d_wait_probe(uint32_t va)
++{
++    enum { SLOT_COUNT = 8 };
++    static uint32_t sites[SLOT_COUNT];
++    static uint64_t hits[SLOT_COUNT];
++    static int count;
++    uint32_t device = 0;
++    uint32_t device_pos = 0;
++    uint32_t device_progress_ptr = 0;
++    uint32_t device_progress_value = 0;
++    uint32_t progress_ptr = g_edx;
++    uint32_t progress_value = 0;
++    int have_device = 0;
++    int have_progress = 0;
++    int i;
++
++    for (i = 0; i < count; ++i) {
++        if (sites[i] == va) {
++            break;
++        }
++    }
++    if (i == count) {
++        if (count == SLOT_COUNT) {
++            return;
++        }
++        sites[count] = va;
++        hits[count] = 0;
++        ++count;
++    }
++
++    ++hits[i];
++    if (hits[i] > 4 && (hits[i] & (hits[i] - 1)) != 0) {
++        return;
++    }
++
++    if (jsrf_guest_read_u32(0x0019DCE0u, &device) &&
++        device >= 0x00001000u && device <= 0x03FFDBBCu) {
++        have_device =
++            jsrf_guest_read_u32(device + 0x30u, &device_pos) &&
++            jsrf_guest_read_u32(device + 0x34u, &device_progress_ptr);
++        if (have_device) {
++            jsrf_guest_read_u32(device_progress_ptr, &device_progress_value);
++        }
++    }
++
++    have_progress = jsrf_guest_read_u32(progress_ptr, &progress_value);
++
++    fprintf(stderr,
++            "[D3DWAIT] va=%08X hit=%llu esp=%08X eax=%08X ecx=%08X "
++            "edx=%08X ebx=%08X esi=%08X edi=%08X "
++            "device=%08X device_pos=%08X device_progress_ptr=%08X "
++            "device_progress_value=%08X progress_ptr=%08X progress_value=%08X",
++            va, (unsigned long long)hits[i], g_esp, g_eax, g_ecx, g_edx,
++            g_ebx, g_esi, g_edi, device, device_pos, device_progress_ptr,
++            device_progress_value, progress_ptr, progress_value);
++    if (!have_device) {
++        fputs(" device_unreadable=1", stderr);
++    }
++    if (!have_progress) {
++        fputs(" progress_unreadable=1", stderr);
++    }
++    fputc('\n', stderr);
++    fflush(stderr);
++}
++
+ static uint32_t current_icall_return_address(void)
+ {
+     if (!g_xbox_mem_offset || !g_esp) {
+--- a/research/JSRF_V17_D3D_FENCE_STALL.md
++++ b/research/JSRF_V17_D3D_FENCE_STALL.md
+@@ -0,0 +1,116 @@
++# JSRF v17 D3D fence stall — root cause and v18 correction
++
++## What v17 fixed
++
++v17 fixed the `lock xadd` flag-tracking bug that had caused a COM object to be
++destroyed twice and the retail heap large free list to self-link. The v17 run
++no longer spins in `sub_001497DC`; it reaches 3,915 indirect calls and enters
++the retail D3D shutdown path.
++
++## v17 watchdog evidence
++
++The final decoded guest call chain is:
++
++```
++0x00154FD0 -> 0x0018CDF0 -> 0x001925A0 -> 0x00191710 -> 0x00191440
++```
++
++The final watchdog registers are:
++
++```
++eax=00000002 ecx=DEADBEEF edx=80000000
++edi=00000007 esi=21524118
++```
++
++There are no kernel calls during the final 60-second watchdog interval, so the
++stall is guest CPU/memory polling rather than a kernel wait.
++
++## Retail D3D code that explains the hang
++
++Retail `0x00191710` calls `0x00191440`. In `0x00191440`, the tight wait is:
++
++```asm
++001914E2  mov edx,[edi+34h]
++001914E5  mov edi,[edi+30h]
++001914E8  mov eax,edi
++001914EA  sub eax,esi
++001914F0  mov ecx,[edx]
++001914F2  mov esi,edi
++001914F4  sub esi,ecx
++001914F6  cmp eax,esi
++001914F8  jb  001914F0
++```
++
++The watchdog register tuple is exactly this loop:
++
++- `edx = 0x80000000` — the guest-visible GPU completion/fence address.
++- `ecx = 0xDEADBEEF` — the current value read from that address.
++- `edi = 7` — the submitted/PUT-side count from `device + 0x30`.
++- `esi = 7 - 0xDEADBEEF = 0x21524118`.
++- `eax = 2` — the comparison window retained by the retail routine.
++
++Therefore `jb 0x001914F0` remains true indefinitely while the completion value
++never advances.
++
++## Why 0x80000000 contains DEADBEEF
++
++Retail D3D itself allocates a 96-byte contiguous block and stores its pointer in
++`device + 0x34`. It initializes that first dword to 3 in `0x00191020`, then
++later deliberately writes the debug/synchronization sentinel:
++
++```asm
++0019247E  mov dword ptr [80000000h],0DEADBEEFh
++```
++
++On real Xbox hardware, submitted NV2A work subsequently updates this GPU-visible
++completion/semaphore word. A static recompiler without a real NV2A consumer
++must provide the equivalent completion acknowledgement or the retail wait is
++correctly infinite.
++
++## Existing xboxrecomp mechanism
++
++Pinned xboxrecomp already contains `xbox_Nv2aMirrorFence(device_ptr_va,
++put_off, get_ptr_off)` specifically for this hardware-semantic gap. Its worker
++follows the registered chain and mirrors the title's submitted count into the
++GPU completion word:
++
++```
++device = MEM32(device_ptr_va)
++fence  = MEM32(device + get_ptr_off)
++MEM32(fence) = MEM32(device + put_off)
++```
++
++The runtime comments describe the same pattern: D3D seeds a semaphore in
++contiguous memory, submits work, then spins until the GPU-written value reaches
++the submitted count. Because this runtime treats submitted work as completed,
++mirroring the count is its intended hardware acknowledgement.
++
++## v18 correction
++
++JSRF's retail offsets are proven directly by `0x00191440`:
++
++- device pointer global: `0x0019DCE0`
++- submitted count / PUT-side value: `device + 0x30`
++- pointer to GPU completion word: `device + 0x34`
++
++v18 therefore registers exactly:
++
++```c
++xbox_Nv2aMirrorFence(0x0019DCE0u, 0x30u, 0x34u)
++```
++
++This is host hardware emulation using xboxrecomp's existing generic mechanism;
++it does not bypass the retail wait, patch the retail D3D function, or substitute
++game logic.
++
++v18 also keeps a read-only `D3DWAIT` probe at the exact retail wait landmarks,
++including support for the contiguous guest window `0x80000000..0x83FFFFFF`, so
++the next Windows run can verify the fence progresses and identify the next
++actual blocker if one remains.
++
++## Separate issue intentionally not bundled
++
++v17 also shows repeated `NtFreeVirtualMemory` failures returning
++`STATUS_UNSUCCESSFUL`. That is a distinct bridge correctness issue and is not
++changed in v18. It should be addressed independently if it remains observable
++after the D3D fence stall is removed.
+--- a/scripts/jsrf_xboxrecomp.py
++++ b/scripts/jsrf_xboxrecomp.py
+@@ -26,6 +26,15 @@
+ ENTRY_DEBUG_XOR = 0x94859D4B
+ THUNK_RETAIL_XOR = 0x5B6D40B6
+ THUNK_DEBUG_XOR = 0xEFB1F152
++
++
++JSRF_D3D_WAIT_PROBE_VAS = (
++    0x00191440,  # enter retail D3D pushbuffer-space wait helper
++    0x001914F0,  # pure guest-memory GET/progress polling loop
++    0x001914FC,  # poll satisfied / post-wait path
++    0x00191510,  # event/kernel wait fallback loop
++    0x0019151F,  # event wait satisfied / continuation
++)
+ 
+ 
+ JSRF_HEAP_PROBE_VAS = (
+@@ -174,6 +183,61 @@
+ 
+     if not found_function:
+         raise RuntimeError("Generated sub_001497DC was not found for v16 heap probing")
++
++
++def instrument_jsrf_d3d_wait_probe(gen_dir: str | Path) -> None:
++    """Inject read-only probes into retail D3D pushbuffer wait 0x00191440.
++
++    v17 advances far beyond the allocator failure and its watchdog stack lands
++    in 0x00191440 through the retail D3D shutdown chain.  The last 60-second
++    interval contains no kernel calls, matching the pure memory polling loop at
++    0x001914F0.  Observe only measured retail block labels so the next run can
++    prove whether the guest-visible progress/GET value is static.
++    """
++    import re
++
++    gen_dir = Path(gen_dir)
++    signature = "void sub_00191440(void)"
++    declaration = "extern void jsrf_d3d_wait_probe(uint32_t va);"
++    found_function = False
++    injected = set()
++
++    for source in sorted(gen_dir.glob("recomp_*.c")):
++        text = source.read_text(encoding="utf-8", errors="replace")
++        start = text.find(signature)
++        if start < 0:
++            continue
++        found_function = True
++        next_function = text.find("\n/**", start + len(signature))
++        end = len(text) if next_function < 0 else next_function
++        body = text[start:end]
++
++        if "jsrf_d3d_wait_probe(" in body:
++            return
++
++        for va in JSRF_D3D_WAIT_PROBE_VAS:
++            label_re = re.compile(rf"(?mi)^(?P<label>loc_{va:08X}:\s*;?\s*)$")
++            replacement = rf"\g<label>\n    jsrf_d3d_wait_probe(0x{va:08X}u);"
++            body, count = label_re.subn(replacement, body, count=1)
++            if count:
++                injected.add(va)
++
++        missing = set(JSRF_D3D_WAIT_PROBE_VAS) - injected
++        if missing:
++            rendered = ", ".join(f"0x{va:08X}" for va in sorted(missing))
++            raise RuntimeError(
++                "Generated sub_00191440 is missing retail D3D wait probe label(s): "
++                + rendered
++            )
++
++        if declaration not in text[:start]:
++            body = declaration + "\n" + body
++        text = text[:start] + body + text[end:]
++        source.write_text(text, encoding="utf-8")
++        return
++
++    if not found_function:
++        raise RuntimeError("Generated sub_00191440 was not found for v18 D3D wait probing")
+ 
+ 
+ def verify_jsrf_generated_contracts(gen_dir: str | Path) -> None:
+@@ -410,6 +474,7 @@
+             pin_jsrf_function_boundaries(functions_path)
+         elif index == 3:
+             instrument_jsrf_heap_allocator_probe(gen_dir)
++            instrument_jsrf_d3d_wait_probe(gen_dir)
+             verify_jsrf_generated_contracts(gen_dir)
+ 
+ 
+--- a/tests/test_jsrf_xboxrecomp.py
++++ b/tests/test_jsrf_xboxrecomp.py
+@@ -194,6 +194,75 @@
+             0x00160CE0, 0x00160D80, 0x00160EA0,
+             0x00166660, 0x001666E0, 0x00166760,
+         }.issubset(starts))
++
++
++
++class JSRFD3DWaitProbeTests(unittest.TestCase):
++    def test_v18_d3d_wait_probe_instruments_only_retail_pushbuffer_wait_landmarks(self):
++        import scripts.jsrf_xboxrecomp as driver
++        instrument = getattr(driver, "instrument_jsrf_d3d_wait_probe", None)
++        self.assertIsNotNone(
++            instrument,
++            "v18 must add focused basic-block probes to retail D3D wait function 0x00191440",
++        )
++        generated = r"""
++void sub_00191440(void)
++{
++loc_00191440: ;
++    eax = 1;
++loc_001914F0: ;
++    eax = 2;
++loc_001914FC: ;
++    eax = 3;
++loc_00191510: ;
++    eax = 4;
++loc_0019151F: ;
++    eax = 5;
++}
++/** next */
++void sub_00192000(void)
++{
++loc_001914F0: ;
++}
++"""
++        with tempfile.TemporaryDirectory() as td:
++            gen_dir = Path(td)
++            source = gen_dir / "recomp_0000.c"
++            source.write_text(generated, encoding="utf-8")
++            instrument(gen_dir)
++            once = source.read_text(encoding="utf-8")
++            instrument(gen_dir)
++            twice = source.read_text(encoding="utf-8")
++
++        self.assertEqual(once, twice, "D3D wait probe injection must be idempotent")
++        self.assertEqual(once.count("extern void jsrf_d3d_wait_probe(uint32_t va);"), 1)
++        for va in driver.JSRF_D3D_WAIT_PROBE_VAS:
++            self.assertEqual(
++                once.count(f"jsrf_d3d_wait_probe(0x{va:08X}u);"),
++                1,
++                f"missing focused D3D wait probe at 0x{va:08X}",
++            )
++        unrelated = once.split("void sub_00192000(void)", 1)[1]
++        self.assertNotIn("jsrf_d3d_wait_probe", unrelated)
++
++    def test_v18_d3d_wait_probe_runtime_dumps_guest_visible_pushbuffer_progress_read_only(self):
++        root = Path(__file__).resolve().parents[1]
++        manual_c = (root / "recomp" / "src" / "recomp_manual.c").read_text(encoding="utf-8")
++        self.assertIn("void jsrf_d3d_wait_probe(uint32_t va)", manual_c)
++        self.assertIn("[D3DWAIT]", manual_c)
++        self.assertIn("0x0019DCE0u", manual_c)
++        self.assertIn("device_pos", manual_c)
++        self.assertIn("progress_ptr", manual_c)
++        self.assertIn("progress_value", manual_c)
++        self.assertNotIn("GUEST_U32(progress_ptr) =", manual_c)
++        self.assertIn("va >= 0x80000000u && va <= 0x83FFFFFCu", manual_c)
++
++    def test_v18_registers_retail_jsrf_d3d_fence_mirror_before_guest_entry(self):
++        root = Path(__file__).resolve().parents[1]
++        main_c = (root / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
++        registration = "xbox_Nv2aMirrorFence(0x0019DCE0u, 0x30u, 0x34u)"
++        self.assertIn(registration, main_c)
++        self.assertLess(main_c.index(registration), main_c.index("xbe_entry_point();"))
+ 
+ 
+ class JSRFFunctionBoundaryTests(unittest.TestCase):
