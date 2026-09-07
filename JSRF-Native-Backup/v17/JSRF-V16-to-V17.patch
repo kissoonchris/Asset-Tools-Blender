@@ -1,0 +1,206 @@
+--- base_v16/scripts/jsrf_xboxrecomp.py	2026-09-07 01:49:37.000000000 +0000
++++ src/scripts/jsrf_xboxrecomp.py	2026-09-07 02:14:01.194629136 +0000
+@@ -53,6 +53,67 @@
+ )
+ 
+ 
++def patch_xboxrecomp_lock_xadd_flags(toolkit_dir: str | Path) -> None:
++    """Restore x86 EFLAGS tracking for lock-prefixed XADD in the pinned toolkit.
++
++    xboxrecomp already lowers both XADD forms through the same atomic primitive,
++    but the pinned lifter classifies ``lock xadd`` as flag-undefined.  A JCC
++    immediately after InterlockedDecrement therefore reads no XADD result.  JSRF
++    uses exactly that MSVC pattern for COM Release methods (for example retail
++    0x0015FD40), so a nonzero reference count can incorrectly take the zero path
++    and destroy a live object.
++
++    Keep the atomic lowering untouched; only make the flag tracker treat the
++    lock-prefixed spelling exactly like the existing xadd condition path.
++    """
++    import re
++
++    toolkit_dir = Path(toolkit_dir)
++    path = toolkit_dir / "tools" / "recomp" / "lifter.py"
++    if not path.is_file():
++        raise FileNotFoundError(f"xboxrecomp lifter was not found: {path}")
++
++    text = path.read_text(encoding="utf-8")
++    if (
++        '"xadd", "lock xadd",' in text
++        and 'if flag_setter in ("xadd", "lock xadd"):' in text
++        and not re.search(r'^\s*"lock xadd",\s*# Lock prefix - complex flag behavior\s*$', text, re.M)
++    ):
++        return
++
++    setter_pattern = re.compile(
++        r'(?m)^(?P<indent>\s*)"xadd",(?P<spacing>\s*)# Exchange-and-add sets flags\s*$'
++    )
++    text, setter_count = setter_pattern.subn(
++        r'\g<indent>"xadd", "lock xadd",\g<spacing># Exchange-and-add sets flags',
++        text,
++        count=1,
++    )
++
++    undefined_pattern = re.compile(
++        r'(?m)^\s*"lock xadd",\s*# Lock prefix - complex flag behavior\s*\n?'
++    )
++    text, undefined_count = undefined_pattern.subn("", text, count=1)
++
++    condition_old = 'if flag_setter == "xadd":'
++    condition_new = 'if flag_setter in ("xadd", "lock xadd"):'
++    condition_count = text.count(condition_old)
++    if condition_count == 1:
++        text = text.replace(condition_old, condition_new, 1)
++    elif condition_new in text:
++        condition_count = 1
++    else:
++        condition_count = 0
++
++    if setter_count != 1 or undefined_count != 1 or condition_count != 1:
++        raise RuntimeError(
++            "Pinned xboxrecomp lock-xadd flag patch no longer matches lifter.py "
++            f"(setter={setter_count}, undefined={undefined_count}, condition={condition_count})"
++        )
++
++    path.write_text(text, encoding="utf-8")
++
++
+ def pin_jsrf_function_boundaries(functions_path: str | Path) -> None:
+     """Pin retail-proven JSRF boundaries that generic seed recovery can weaken.
+ 
+@@ -402,6 +463,7 @@
+ 
+     gen_dir = project_root / "recomp" / "src" / "recomp" / "gen"
+     gen_dir.mkdir(parents=True, exist_ok=True)
++    patch_xboxrecomp_lock_xadd_flags(toolkit_dir)
+     commands = build_pipeline_commands(toolkit_dir, game_dir, project_root, python_exe)
+     for index, command in enumerate(commands):
+         subprocess.run(command, cwd=toolkit_dir, check=True)
+--- /dev/null	2026-09-07 01:43:08.164787492 +0000
++++ src/research/JSRF_V16_LOCK_XADD_ROOT_CAUSE.md	2026-09-07 02:15:19.221787312 +0000
+@@ -0,0 +1,67 @@
++# JSRF v16 root cause: lock XADD flags destroy a live COM object
++
++Date: 2026-09-06
++Retail XBE SHA-256: `fd19055756719893c466302809b433b785ecf5732df0441286f3f605f0f3ef9c`
++Pinned xboxrecomp: `4d337526dc4ab892483aad0246aee9d1c33d1b81`
++
++## Runtime evidence
++
++The v16 heap probe turns the allocator watchdog into a deterministic data
++structure failure.  At retail `0x00149B28`, the large-list sentinel at
++`0x00F80180` points to node `0x0105DE68`, while that node's `next` and `prev`
++both point to itself.  The same tuple repeats through billions of loop visits.
++The allocator is therefore not merely slow: it is traversing a one-node cycle.
++
++`0x0105DE68` is the free-list node embedded in heap block header `0x0105DE60`.
++The user pointer for that block is `0x0105DE70`.
++
++Immediately before the corruption, the same `0x0105DE70` object enters retail
++COM Release method `0x0015FD40` with its reference count at `+8` equal to 2.
++Nevertheless the trace enters deleting destructor `0x00160EA0` through the
++zero-count path.  A second Release sees count 1 and enters the deleting
++destructor again.  The resulting second free inserts the same heap node twice,
++turning the singleton free-list node into a self-cycle.  A later allocation
++then spins forever at `0x00149B28`.
++
++## Retail instruction contract
++
++Retail `0x0015FD40` contains the normal MSVC InterlockedDecrement pattern:
++
++```
++0015FD40  mov  ecx,[esp+4]
++0015FD44  lea  eax,[ecx+8]
++0015FD47  or   edx,-1
++0015FD4A  lock xadd [eax],edx
++0015FD4E  jne  0015FD60
++0015FD50  test ecx,ecx
++...
++0015FD58  call [vtable+48h]   ; deleting destructor only when new count == 0
++```
++
++XADD writes the sum to the destination and returns the old value in EDX.  Its
++EFLAGS are the flags from that addition, so the JNE at `0x0015FD4E` must be
++taken when the new reference count is nonzero.
++
++## Pinned xboxrecomp defect
++
++The pinned lifter already lowers both `xadd` and `lock xadd` through the atomic
++`RECOMP_ATOMIC_ADD32` primitive.  It also has an XADD-specific JCC condition
++path that tests the destination (the sum) for zero/nonzero.  However, its flag
++tracker puts the literal mnemonic `lock xadd` in `_FLAGS_UNDEFINED` while only
++`xadd` is in `_EFLAGS_SETTERS`.  The following JNE therefore does not use the
++XADD result.
++
++This is a code-generation correctness defect, not a JSRF allocator bug and not
++a reason to replace retail heap behavior.
++
++## v17 correction
++
++Before generating JSRF, the project patches the pinned toolkit locally so flag
++tracking treats `lock xadd` like `xadd` while leaving the existing atomic
++lowering untouched.  The patch is intentionally applied after the pinned Git
++checkout and before the recompilation command, making Windows builds
++reproducible without requiring the user to edit xboxrecomp by hand.
++
++The patch changes only lifter flag classification/condition recognition.  It
++does not alter the retail XBE, reference-count values, heap implementation,
++critical-section behavior, or gameplay.
+--- base_v16/tests/test_jsrf_xboxrecomp.py	2026-09-07 01:49:10.000000000 +0000
++++ src/tests/test_jsrf_xboxrecomp.py	2026-09-07 02:13:44.859755775 +0000
+@@ -393,6 +393,55 @@
+             driver.verify_jsrf_generated_contracts(gen_dir)
+ 
+ 
++class JSRFLockXaddFlagPatchTests(unittest.TestCase):
++    def test_patches_pinned_xboxrecomp_lock_xadd_flag_tracking(self):
++        import scripts.jsrf_xboxrecomp as driver
++        patch = getattr(driver, "patch_xboxrecomp_lock_xadd_flags", None)
++        self.assertIsNotNone(
++            patch,
++            "JSRF must correct pinned xboxrecomp's lock-xadd flag tracking before generation",
++        )
++        lifter = r'''
++_EFLAGS_SETTERS = frozenset({
++    "cmpxchg",
++    "xadd",              # Exchange-and-add sets flags
++})
++_FLAGS_UNDEFINED = frozenset({
++    "mul",
++    "lock xadd",           # Lock prefix - complex flag behavior
++})
++
++def _make_jcc_condition(jcc, flag_setter, lhs, desc):
++    if flag_setter == "xadd":
++        if jcc in ("jne", "jnz"):
++            return f"({lhs} != 0)", desc
++'''
++        with tempfile.TemporaryDirectory() as td:
++            toolkit = Path(td)
++            path = toolkit / "tools" / "recomp" / "lifter.py"
++            path.parent.mkdir(parents=True)
++            path.write_text(lifter, encoding="utf-8")
++            patch(toolkit)
++            once = path.read_text(encoding="utf-8")
++            patch(toolkit)
++            twice = path.read_text(encoding="utf-8")
++
++        self.assertEqual(once, twice, "toolkit flag patch must be idempotent")
++        self.assertIn('"xadd", "lock xadd",', once)
++        self.assertNotIn('"lock xadd",           # Lock prefix - complex flag behavior', once)
++        self.assertIn('if flag_setter in ("xadd", "lock xadd"):', once)
++
++    def test_pipeline_applies_lock_xadd_flag_patch_before_recompilation(self):
++        import inspect
++        import scripts.jsrf_xboxrecomp as driver
++        source = inspect.getsource(driver.run_pipeline)
++        self.assertIn("patch_xboxrecomp_lock_xadd_flags(toolkit_dir)", source)
++        self.assertLess(
++            source.index("patch_xboxrecomp_lock_xadd_flags(toolkit_dir)"),
++            source.index("commands = build_pipeline_commands"),
++        )
++
++
+ class RecompProjectStructureTests(unittest.TestCase):
+ 
+     def test_runtime_seed_file_contains_only_measured_function_entry_targets(self):
