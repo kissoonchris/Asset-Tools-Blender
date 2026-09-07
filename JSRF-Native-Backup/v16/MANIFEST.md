@@ -56,8 +56,8 @@ ChatGPT Files Library `/JSRF/`:
 GitHub backup branch:
 
 - `jsrf-native-backup-v16-stage`
-- Stores this manifest, the v15→v16 patch, and complete copies of every modified
-  text source file needed to recover the v16 diagnostic delta.
+- Stores this manifest and the complete v15→v16 source patch as a redundant
+  text backup. The tested full source/easy-test archives are stored in `/JSRF/`.
 
 ## Next Windows evidence needed
 
