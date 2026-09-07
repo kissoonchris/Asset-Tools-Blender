@@ -1,0 +1,116 @@
+diff --git a/recomp/src/main.c b/recomp/src/main.c
+index 069d9a7..6d9ec9a 100644
+--- a/recomp/src/main.c
++++ b/recomp/src/main.c
+@@ -233,9 +233,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
+      * window for the emulated MCPX device.  v20 proved JSRF otherwise returns
+      * DSERR_NODRIVER (0x88780078) from this exact startup call.
+      */
+-    SetEnvironmentVariableA("RECOMP_AC97_READY", "1");
+-    /* Bounded by xboxrecomp to the first 400 APU MMIO accesses. */
+-    SetEnvironmentVariableA("RECOMP_APU_TRACE", "1");
++    /*
++     * xboxrecomp reads these switches with the CRT getenv(), not the Win32
++     * GetEnvironmentVariable API.  SetEnvironmentVariableA changes the OS
++     * process environment but does not update the CRT _environ table, which
++     * is why v21 logged neither the AC97-ready/trapped-APU startup lines nor
++     * any bounded APU MMIO trace despite setting both names.  _putenv_s and
++     * getenv share _environ, so set the switches through the same interface
++     * that the runtime reads.
++     */
++    if (_putenv_s("RECOMP_AC97_READY", "1") != 0 ||
++        _putenv_s("RECOMP_APU_TRACE", "1") != 0) {
++        fprintf(stderr, "[BOOT] could not enable xboxrecomp MCPX diagnostics\n");
++        free(xbe_data);
++        return 1;
++    }
+ 
+     if (!xbox_MemoryLayoutInit(xbe_data, xbe_size)) {
+         MessageBoxA(NULL, "xboxrecomp could not initialize the Xbox memory layout.",
+diff --git a/research/JSRF_V21_CRT_ENVIRONMENT_SWITCH.md b/research/JSRF_V21_CRT_ENVIRONMENT_SWITCH.md
+new file mode 100644
+index 0000000..34cbe8f
+--- /dev/null
++++ b/research/JSRF_V21_CRT_ENVIRONMENT_SWITCH.md
+@@ -0,0 +1,40 @@
++# JSRF v21: xboxrecomp environment switch did not reach `getenv`
++
++## Windows evidence
++
++v21 successfully created the upstream MCPX APU object:
++
++- `[APU] MCPX APU initialized (standalone)` is present.
++
++But the memory-layout phase did **not** print either line that the pinned
++xboxrecomp source emits when `RECOMP_AC97_READY` is visible through `getenv()`:
++
++- `APU: 0xFE800000..0xFE880000 trapped for MMIO`
++- `AC97: codec reported ready ...`
++
++The v21 run instead still reports only the ordinary zeroed MCPX aperture, and
++there are no `[APUMMIO]` lines even though `RECOMP_APU_TRACE` was also requested.
++Later, the same retail DirectSound path returns `0x88780078` again.
++
++That combination proves the APU object itself was not the missing piece. Both
++xboxrecomp `getenv()` switches were invisible.
++
++## Root cause
++
++v21 used Win32 `SetEnvironmentVariableA()` immediately before
++`xbox_MemoryLayoutInit()`. The pinned xboxrecomp runtime reads the switches with
++C `getenv()`. On MSVC/UCRT, `getenv()` reads the CRT `_environ` table, while
++`SetEnvironmentVariableA()` updates the process environment maintained by the
++OS. Updating the latter after CRT startup does not update the former.
++
++Microsoft's CRT documentation explicitly states that `getenv` and `_putenv_s`
++use `_environ` and that `_putenv_s` modifies that table.
++
++## v22 correction
++
++Use `_putenv_s()` for `RECOMP_AC97_READY` and `RECOMP_APU_TRACE`, before
++`xbox_MemoryLayoutInit()`, and fail boot if either setter fails.
++
++No guest return value is changed and no DirectSound call is replaced. This only
++makes the already-selected xboxrecomp hardware-emulation path actually receive
++its configuration through the interface it reads.
+diff --git a/tests/test_jsrf_xboxrecomp.py b/tests/test_jsrf_xboxrecomp.py
+index ec1c9a0..19a232b 100644
+--- a/tests/test_jsrf_xboxrecomp.py
++++ b/tests/test_jsrf_xboxrecomp.py
+@@ -293,7 +293,7 @@ class JSRFApuRuntimeTests(unittest.TestCase):
+     def test_v21_enables_upstream_ac97_apu_path_before_memory_layout(self):
+         root = Path(__file__).resolve().parents[1]
+         main_c = (root / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
+-        enable = 'SetEnvironmentVariableA("RECOMP_AC97_READY", "1")'
++        enable = '_putenv_s("RECOMP_AC97_READY", "1")'
+         init = "xbox_MemoryLayoutInit(xbe_data, xbe_size)"
+         self.assertIn(enable, main_c)
+         self.assertIn(init, main_c)
+@@ -322,7 +322,7 @@ class JSRFApuRuntimeTests(unittest.TestCase):
+     def test_v21_enables_bounded_upstream_apu_trace_for_next_windows_run(self):
+         root = Path(__file__).resolve().parents[1]
+         main_c = (root / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
+-        self.assertIn('SetEnvironmentVariableA("RECOMP_APU_TRACE", "1")', main_c)
++        self.assertIn('_putenv_s("RECOMP_APU_TRACE", "1")', main_c)
+ 
+ 
+ 
+@@ -785,6 +785,18 @@ class WindowsBootstrapStructureTests(unittest.TestCase):
+         self.assertIn("Build-JSRF-XboxRecomp.ps1", bat)
+         self.assertIn("-Run", bat)
+ 
++class JSRFWindowsEnvironmentTests(unittest.TestCase):
++    def test_v22_uses_crt_environment_for_xboxrecomp_getenv_switches(self):
++        root = Path(__file__).resolve().parents[1]
++        main_c = (root / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
++        # xboxrecomp reads these switches with C getenv().  Win32
++        # SetEnvironmentVariableA updates the process environment block but
++        # does not update the CRT environment table that getenv() reads.
++        self.assertIn('_putenv_s("RECOMP_AC97_READY", "1")', main_c)
++        self.assertIn('_putenv_s("RECOMP_APU_TRACE", "1")', main_c)
++        self.assertNotIn('SetEnvironmentVariableA("RECOMP_AC97_READY", "1")', main_c)
++        self.assertNotIn('SetEnvironmentVariableA("RECOMP_APU_TRACE", "1")', main_c)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
