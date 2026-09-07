@@ -1,0 +1,134 @@
+diff -ruN '--exclude=build_verify' '--exclude=__pycache__' '--exclude=.pytest_cache' jsrf_v19_base/recomp/jsrf_trace_functions.json jsrf_v20_work/recomp/jsrf_trace_functions.json
+--- jsrf_v19_base/recomp/jsrf_trace_functions.json	2026-09-07 01:30:06.000000000 +0000
++++ jsrf_v20_work/recomp/jsrf_trace_functions.json	2026-09-07 04:51:09.860877568 +0000
+@@ -9,5 +9,21 @@
+   "0x00160EA0",
+   "0x00166660",
+   "0x001666E0",
+-  "0x00166760"
++  "0x00166760",
++  "0x0006F9E0",
++  "0x00012210",
++  "0x0005F350",
++  "0x00012C10",
++  "0x00013F80",
++  "0x0014CAA0",
++  "0x001BB690",
++  "0x0014CAF0",
++  "0x001BB750",
++  "0x0005F2C0",
++  "0x0005F250",
++  "0x00156DF0",
++  "0x001680D0",
++  "0x00116EC0",
++  "0x0014ADA3",
++  "0x00147532"
+ ]
+diff -ruN '--exclude=build_verify' '--exclude=__pycache__' '--exclude=.pytest_cache' jsrf_v19_base/research/JSRF_V19_GAME_MAIN_RETURN.md jsrf_v20_work/research/JSRF_V19_GAME_MAIN_RETURN.md
+--- jsrf_v19_base/research/JSRF_V19_GAME_MAIN_RETURN.md	1970-01-01 00:00:00.000000000 +0000
++++ jsrf_v20_work/research/JSRF_V19_GAME_MAIN_RETURN.md	2026-09-07 04:51:44.098451408 +0000
+@@ -0,0 +1,70 @@
++# JSRF v19 Windows run — retail game main returns after negative startup status
++
++Date: 2026-09-07
++
++## Observed behavior
++
++The v19 Windows run no longer reaches either of the previous watchdog stalls.
++The JSRF-specific NV2A fence mirror is registered, the retail D3D wait at
++`0x00191440` reaches its post-wait block at `0x001914FC`, and the process later
++exits through `HalReturnToFirmware(2)` with launch-data words `1, 0, 1, 0`.
++The host exits with code 0 because this is a title-requested reboot, not a host
++crash.
++
++## Retail control flow
++
++The XBE entry point (`0x00148023`) creates the main title thread.  The successful
++Windows trace shows that thread creation succeeds, so the entry-point failure
++path at `0x0014806F` is not the observed reboot.
++
++The title-thread wrapper at `0x00147FB4` calls the retail game main at
++`0x0006F9E0`.  When that function returns, the wrapper executes:
++
++- `push 0`
++- `push 1`
++- `push 1`
++- `call 0x0014ADA3`
++
++`0x0014ADA3` builds a zeroed launch-data block whose first four dwords are
++`arg1, 0, arg2, arg3`, then calls the `XLaunchNewImage`-style helper at
++`0x00147532`.  That helper constructs the launch-data page and calls
++`HalReturnToFirmware(2)`.  Therefore the v19 launch data `1, 0, 1, 0` matches the
++normal "game main returned" path at `0x00148019`.
++
++## Why retail game main returns
++
++`0x0006F9E0` has a compact application lifetime:
++
++1. allocate and construct the main application object (`0x00012210`);
++2. call setup method `0x00012C10`;
++3. call run method `0x00013F80`;
++4. destroy the object and return 0.
++
++The constructor stores the return value of `sub_0005F350` at object offset
++`+0x10`.  Both setup and run test that same field.  `0x00012C10` skips setup if
++it is negative, while `0x00013F80` returns `-1` immediately if it is negative.
++If the value is non-negative, `0x00013F80` enters the title's persistent loop.
++
++So the next concrete question is not why XAPI reboots: the retail game main has
++already returned.  The question is which subsystem inside `sub_0005F350`
++produces the negative startup status stored at `+0x10`.
++
++## v20 diagnostic scope
++
++v20 adds trace-only coverage for the retail game-main/startup chain and the
++direct status-producing calls inside `sub_0005F350`.  No guest state is changed.
++The trace includes:
++
++- `0x0006F9E0` — retail game main
++- `0x00012210` — main application constructor
++- `0x0005F350` — startup status producer
++- `0x00012C10` — setup status check
++- `0x00013F80` — run-loop status check
++- `0x0014CAA0`, `0x001BB690`, `0x0014CAF0`, `0x001BB750`
++- `0x0005F2C0`, `0x0005F250`, `0x00156DF0`
++- `0x001680D0`, `0x00116EC0`
++- `0x0014ADA3`, `0x00147532` — reboot path confirmation
++
++This is deliberately diagnostic only.  The repeated `NtFreeVirtualMemory`
++failures and any D3D/audio return value are not changed until the trace proves
++which one is causal.
+diff -ruN '--exclude=build_verify' '--exclude=__pycache__' '--exclude=.pytest_cache' jsrf_v19_base/tests/test_jsrf_xboxrecomp.py jsrf_v20_work/tests/test_jsrf_xboxrecomp.py
+--- jsrf_v19_base/tests/test_jsrf_xboxrecomp.py	2026-09-07 03:21:38.000000000 +0000
++++ jsrf_v20_work/tests/test_jsrf_xboxrecomp.py	2026-09-07 04:51:02.361694414 +0000
+@@ -195,6 +195,30 @@
+             0x00166660, 0x001666E0, 0x00166760,
+         }.issubset(starts))
+ 
++    def test_v20_trace_covers_game_main_startup_failure_chain(self):
++        root = Path(__file__).resolve().parents[1]
++        path = root / "recomp" / "jsrf_trace_functions.json"
++        starts = {
++            int(value, 16) if isinstance(value, str) else int(value)
++            for value in json.loads(path.read_text(encoding="utf-8"))
++        }
++        # v19 clears the heap and D3D fence stalls, then the retail game main
++        # returns and XAPI reboots.  The application stores sub_0005F350's
++        # startup status at +0x10; both setup and the main loop bail on a
++        # negative value.  Trace the complete direct-call chain so one Windows
++        # run identifies the first failing subsystem without changing guest state.
++        self.assertTrue({
++            0x0006F9E0,  # retail game main
++            0x00012210,  # main application constructor
++            0x0005F350,  # startup status producer
++            0x00012C10,  # setup method that checks +0x10
++            0x00013F80,  # run loop that checks +0x10
++            0x0014CAA0, 0x001BB690, 0x0014CAF0, 0x001BB750,
++            0x0005F2C0, 0x0005F250, 0x00156DF0,
++            0x001680D0, 0x00116EC0,
++            0x0014ADA3, 0x00147532,
++        }.issubset(starts))
++
+ 
+ 
+ class JSRFD3DWaitProbeTests(unittest.TestCase):
