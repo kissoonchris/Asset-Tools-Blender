@@ -55,5 +55,6 @@ The same test passes in v19 after composing v18 on top of v17.
 - `JSRF-V18-to-V19.patch`
   SHA-256: `d5ecdcc033b5d7389912215fc2aa2c6b4cc584f5d6a77390372640229d64a994`
 
-GitHub stores this manifest plus the v18→v19 text patch as redundant backup.
-The tested full ZIP archives are also saved in the `/JSRF/` Files Library.
+GitHub stores this manifest on `jsrf-native-backup-v19-stage`; that branch
+inherits the previously backed-up v17 and v18 patch history. The v18→v19
+patch and the tested full ZIP archives are saved in the `/JSRF/` Files Library.
