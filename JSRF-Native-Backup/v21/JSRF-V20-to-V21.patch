@@ -1,0 +1,159 @@
+diff --git a/recomp/src/main.c b/recomp/src/main.c
+index 6b94626..069d9a7 100644
+--- a/recomp/src/main.c
++++ b/recomp/src/main.c
+@@ -9,6 +9,7 @@
+ #include <windows.h>
+ #include <dbghelp.h>
+ #include <stdint.h>
++#include <stdbool.h>
+ #include <stddef.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -22,6 +23,9 @@ extern ptrdiff_t g_xbox_mem_offset;
+ extern volatile uint32_t g_icall_trace[16];
+ extern volatile uint32_t g_icall_trace_idx;
+ extern volatile uint64_t g_icall_count;
++extern MCPXAPUState *g_apu_state;
++extern bool apu_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
++                                 uint32_t fault_xbox_va, int is_write);
+ 
+ #define JSRF_ENTRY_POINT 0x00148023
+ #define JSRF_TITLE_ID    0x5345000A
+@@ -134,6 +138,28 @@ static LONG CALLBACK jsrf_veh_handler(PEXCEPTION_POINTERS ep)
+ {
+     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+         uintptr_t fault = ep->ExceptionRecord->ExceptionInformation[1];
++
++        /*
++         * When RECOMP_AC97_READY is enabled, xboxrecomp deliberately marks
++         * the MCPX APU's 512 KiB register window PAGE_NOACCESS.  Guest XDK
++         * DirectSound accesses then fault here so the toolkit's existing APU
++         * decoder can give those registers their hardware semantics.  Handle
++         * only that exact guest range; every other access violation remains a
++         * crash diagnostic below.
++         */
++        if (g_xbox_mem_offset && g_apu_state) {
++            uintptr_t native_base = (uintptr_t)g_xbox_mem_offset;
++            if (fault >= native_base) {
++                uint64_t guest64 = (uint64_t)(fault - native_base);
++                if (guest64 >= 0xFE800000u && guest64 < 0xFE880000u) {
++                    uint32_t guest_va = (uint32_t)guest64;
++                    int is_write = ep->ExceptionRecord->ExceptionInformation[0] == 1;
++                    if (apu_hook_handle_mmio(ep->ContextRecord, fault, guest_va, is_write))
++                        return EXCEPTION_CONTINUE_EXECUTION;
++                }
++            }
++        }
++
+         fprintf(stderr,
+                 "[CRASH] RIP=0x%llX fault=0x%llX (%s)\n",
+                 (unsigned long long)ep->ContextRecord->Rip,
+@@ -200,6 +226,17 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
+         return 1;
+     }
+ 
++    /*
++     * Retail Xbox DirectSound expects a present AC'97 codec and programs the
++     * MCPX APU directly.  xboxrecomp already models both pieces behind this
++     * opt-in: it reports the codec-ready status bit and traps the APU MMIO
++     * window for the emulated MCPX device.  v20 proved JSRF otherwise returns
++     * DSERR_NODRIVER (0x88780078) from this exact startup call.
++     */
++    SetEnvironmentVariableA("RECOMP_AC97_READY", "1");
++    /* Bounded by xboxrecomp to the first 400 APU MMIO accesses. */
++    SetEnvironmentVariableA("RECOMP_APU_TRACE", "1");
++
+     if (!xbox_MemoryLayoutInit(xbe_data, xbe_size)) {
+         MessageBoxA(NULL, "xboxrecomp could not initialize the Xbox memory layout.",
+                     "JSRF recomp", MB_ICONERROR);
+@@ -209,6 +246,22 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
+ 
+     g_xbox_mem_offset = xbox_GetMemoryOffset();
+ 
++    /*
++     * The title links the Xbox XDK DirectSound implementation into the XBE,
++     * so its hardware register traffic must reach the MCPX APU rather than a
++     * fake host DirectSound success path.  The generic xboxrecomp APU is the
++     * hardware model intended for exactly this case.
++     */
++    MCPXAPUState *jsrf_apu = mcpx_apu_init_standalone(
++        (uint8_t *)xbox_GetMemoryBase());
++    if (!jsrf_apu) {
++        fprintf(stderr, "[BOOT] could not initialize MCPX APU emulation\n");
++        xbox_MemoryLayoutShutdown();
++        free(xbe_data);
++        return 1;
++    }
++    g_apu_state = jsrf_apu;
++
+     /*
+      * Retail JSRF D3D keeps its submitted fence count at device+0x30 and a
+      * pointer to the GPU-written completion value at device+0x34. The latter
+@@ -219,6 +272,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
+      */
+     if (xbox_Nv2aMirrorFence(0x0019DCE0u, 0x30u, 0x34u) != 0) {
+         fprintf(stderr, "[BOOT] could not register JSRF NV2A fence mirror\n");
++        g_apu_state = NULL;
++        mcpx_apu_shutdown(jsrf_apu);
+         xbox_MemoryLayoutShutdown();
+         free(xbe_data);
+         return 1;
+@@ -241,6 +296,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
+     xbox_WatchdogStart();
+     xbe_entry_point();
+ 
++    /* Stop hardware workers while the guest RAM they reference still exists. */
++    g_apu_state = NULL;
++    mcpx_apu_shutdown(jsrf_apu);
+     xbox_kernel_shutdown();
+     xbox_MemoryLayoutShutdown();
+     free(xbe_data);
+diff --git a/tests/test_jsrf_xboxrecomp.py b/tests/test_jsrf_xboxrecomp.py
+index 704a41a..ec1c9a0 100644
+--- a/tests/test_jsrf_xboxrecomp.py
++++ b/tests/test_jsrf_xboxrecomp.py
+@@ -289,6 +289,43 @@ loc_001914F0: ;
+         self.assertLess(main_c.index(registration), main_c.index("xbe_entry_point();"))
+ 
+ 
++class JSRFApuRuntimeTests(unittest.TestCase):
++    def test_v21_enables_upstream_ac97_apu_path_before_memory_layout(self):
++        root = Path(__file__).resolve().parents[1]
++        main_c = (root / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
++        enable = 'SetEnvironmentVariableA("RECOMP_AC97_READY", "1")'
++        init = "xbox_MemoryLayoutInit(xbe_data, xbe_size)"
++        self.assertIn(enable, main_c)
++        self.assertIn(init, main_c)
++        self.assertLess(main_c.index(enable), main_c.index(init))
++
++    def test_v21_initializes_and_owns_upstream_mcpx_apu(self):
++        root = Path(__file__).resolve().parents[1]
++        main_c = (root / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
++        self.assertIn("mcpx_apu_init_standalone", main_c)
++        self.assertIn("g_apu_state = jsrf_apu", main_c)
++        self.assertIn("mcpx_apu_shutdown(jsrf_apu)", main_c)
++        self.assertIn("g_apu_state = NULL", main_c)
++        self.assertLess(main_c.index("mcpx_apu_init_standalone"), main_c.index("xbe_entry_point();"))
++
++    def test_v21_routes_only_apu_mmio_faults_to_upstream_veh_decoder(self):
++        root = Path(__file__).resolve().parents[1]
++        main_c = (root / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
++        self.assertIn("apu_hook_handle_mmio", main_c)
++        self.assertIn("0xFE800000u", main_c)
++        self.assertIn("0xFE880000u", main_c)
++        self.assertIn("EXCEPTION_CONTINUE_EXECUTION", main_c)
++        # Crash diagnostics must remain as the fallback for non-APU faults.
++        self.assertIn("[CRASH]", main_c)
++        self.assertIn("EXCEPTION_CONTINUE_SEARCH", main_c)
++
++    def test_v21_enables_bounded_upstream_apu_trace_for_next_windows_run(self):
++        root = Path(__file__).resolve().parents[1]
++        main_c = (root / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
++        self.assertIn('SetEnvironmentVariableA("RECOMP_APU_TRACE", "1")', main_c)
++
++
++
+ class JSRFFunctionBoundaryTests(unittest.TestCase):
+     def test_pins_directxfile_vtable_method_as_strong_standalone_function(self):
+         import scripts.jsrf_xboxrecomp as driver
