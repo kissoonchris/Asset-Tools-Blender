@@ -1,0 +1,118 @@
+diff --git a/recomp/jsrf_runtime_seeds.json b/recomp/jsrf_runtime_seeds.json
+index 2b9d847..16a82f0 100644
+--- a/recomp/jsrf_runtime_seeds.json
++++ b/recomp/jsrf_runtime_seeds.json
+@@ -1,4 +1,32 @@
+ [
++  {
++    "start": "0x0013B0A0",
++    "note": "Retail DirectSound callback referenced by sub_0013B330. Exact standalone boundary proven from retail code; batch-pinned after v25 exposed adjacent worker callback targets."
++  },
++  {
++    "start": "0x0013B0E0",
++    "note": "Retail DirectSound callback referenced by sub_0013B330. Exact standalone boundary proven from retail code; batch-pinned after v25 exposed adjacent worker callback targets."
++  },
++  {
++    "start": "0x0013B110",
++    "note": "Retail DirectSound callback referenced by sub_0013B330. Exact standalone boundary proven from retail code; batch-pinned after v25 exposed adjacent worker callback targets."
++  },
++  {
++    "start": "0x0013B180",
++    "note": "Retail DirectSound worker thread routine passed by sub_0013B330 to the Xbox thread-creation path; v25 runtime reached it as an unresolved indirect call."
++  },
++  {
++    "start": "0x0013B1C0",
++    "note": "Retail DirectSound worker thread routine passed by sub_0013B330 to the Xbox thread-creation path; v25 runtime reached it as an unresolved indirect call."
++  },
++  {
++    "start": "0x0013B230",
++    "note": "Retail DirectSound worker thread routine passed by sub_0013B330 to the Xbox thread-creation path; v25 runtime reached it as an unresolved indirect call."
++  },
++  {
++    "start": "0x0013B2A0",
++    "note": "Retail DirectSound worker thread routine passed by sub_0013B330 to the Xbox thread-creation path; v25 runtime reached it as an unresolved indirect call."
++  },
+   {
+     "start": "0x00154D70",
+     "note": "Retail vtable-only method at vtable 0x001E0F00 + 0x1C. v9 ABI evidence shows its caller 0x00154E00 returns 12 bytes short, exactly this method's ret 0x0C cleanup. Seed as a real function, not a data-pointer alias."
+@@ -167,6 +195,14 @@
+     "start": "0x001A52A4",
+     "note": "Observed unresolved indirect-call target in DSOUND section in JSRF native run 2026-09-06."
+   },
++  {
++    "start": "0x001BCAA3",
++    "note": "Retail XPP callback stored as a function pointer and reached by the callback loop around 0x001BCC0D; v25 runtime reached it as an unresolved indirect call."
++  },
++  {
++    "start": "0x001BD274",
++    "note": "Retail XPP callback stored as a function pointer and reached by the callback loop around 0x001BCC0D; v25 runtime reached it as an unresolved indirect call."
++  },
+   {
+     "start": "0x001BDAA9",
+     "note": "Observed unresolved indirect-call target in XPP section in JSRF native run 2026-09-06."
+diff --git a/recomp/src/main.c b/recomp/src/main.c
+index 6d9ec9a..387c1f7 100644
+--- a/recomp/src/main.c
++++ b/recomp/src/main.c
+@@ -305,6 +305,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
+         fprintf(stderr, "[BOOT] flat dispatch unavailable; binary-search dispatch remains active\n");
+     }
+ 
++    xbox_WatchdogSetProgressCounter(&g_icall_count);
+     xbox_WatchdogStart();
+     xbe_entry_point();
+ 
+diff --git a/research/JSRF_V25_ITERATION_ACCELERATION.md b/research/JSRF_V25_ITERATION_ACCELERATION.md
+new file mode 100644
+index 0000000..3bd7a54
+--- /dev/null
++++ b/research/JSRF_V25_ITERATION_ACCELERATION.md
+@@ -0,0 +1,48 @@
++# JSRF v25 -> v26: batching and unattended iteration
++
++## What v25 proved
++
++v25 fixed the missing `0x00178F40` callable entry. The title no longer faults at the prior DirectSound point and continues through a large DirectSound physical-page setup.
++
++The v25 watchdog sample was not a true stall. Immediately before the 60-second watchdog fired, the title was still advancing through ordinal 173 (`MmGetPhysicalAddress`) page by page, reached the last page of the `0x0136B000..0x0142D000` allocation, and then wrote APU register `0x020D4`. The absolute wall-clock watchdog therefore terminated a run that was still making forward progress.
++
++The same run also exposed six unique unresolved indirect-call targets:
++
++- `0x0013B180`
++- `0x0013B1C0`
++- `0x0013B230`
++- `0x0013B2A0`
++- `0x001BCAA3`
++- `0x001BD274`
++
++Retail code proves the four `0x0013Bxxx` addresses are worker routines passed by `0x0013B330` to the title's thread setup. The three nearby `0x0013B0A0`, `0x0013B0E0`, and `0x0013B110` callback entries are registered by the same setup function and have padding/return-delimited bodies, so v26 pins the whole proven callback cluster rather than waiting for each one to appear in a separate Windows run.
++
++The two XPP targets are literal retail function pointers consumed by the callback-dispatch path around `0x001BCC0D` and also have measured standalone boundaries.
++
++## v26 changes
++
++### Batch current callback entries
++
++v26 seeds and pins all nine proven callback/worker entries in one release. This removes the known one-target-per-test bottleneck without inventing any game behavior.
++
++### Automatic safe ICALL promotion
++
++`promote-unresolved` parses a runtime log and may add an unresolved target to the next discovery pass only when all of these are true:
++
++1. the runtime actually attempted that indirect call;
++2. the target lies in a raw-backed section that JSRF's recompiler treats as code; and
++3. the retail XBE independently contains that address as a literal 32-bit pointer / callback immediate.
++
++Ambiguous targets are left alone. No function result or guest state is forced.
++
++`START JSRF TEST.bat` may use this up to three times in one user-initiated run, preserving each pass's diagnostics before rebuilding.
++
++### Progress-aware watchdog
++
++The pinned xboxrecomp watchdog is patched to accept an optional progress counter. JSRF registers its existing indirect-call counter. The 60-second value now means **60 seconds with no indirect-call progress**, rather than 60 seconds since launch. A title that is still moving through setup is no longer killed just because setup takes longer than one minute; a genuine tight stall still produces the same watchdog diagnostics after one minute without progress.
++
++### Persistent setup cache
++
++The xboxrecomp checkout is now kept under `%LOCALAPPDATA%\\JSRF-Native-Cache`, and its pinned revision is fetched only when the cached checkout is not already at the required commit. Capstone is installed only if importing it fails. The selected JSRF game folder is remembered in the same cache.
++
++These changes reduce repeated network/package setup and reduce how often a new user test is needed to discover the next callable entry.
