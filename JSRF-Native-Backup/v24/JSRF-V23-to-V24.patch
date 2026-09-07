@@ -1,0 +1,232 @@
+diff --git a/research/JSRF_V23_REPE_CMPSD_ROOT_CAUSE.md b/research/JSRF_V23_REPE_CMPSD_ROOT_CAUSE.md
+new file mode 100644
+index 0000000..3c26ede
+--- /dev/null
++++ b/research/JSRF_V23_REPE_CMPSD_ROOT_CAUSE.md
+@@ -0,0 +1,94 @@
++# JSRF v23: repeated CMPSD flag-tracking root cause
++
++## Runtime result
++
++v23 keeps the AC'97/APU path active and reaches the DirectSound setup path.
++`sub_001680D0` returns success.  The next checked startup call,
++`sub_00116EC0`, still returns `0x800401F1`.
++
++The new vtable traces make the bad dispatch visible:
++
++1. `sub_00116EC0` calls `0x00168310` with IID pointer `0x001E391C` and root
++   object `0x0107FE30`.
++2. `0x00168310` returns success.
++3. The interface pointer subsequently used by the caller is still
++   `0x0107FE30`, whose vtable is `0x001E3A70`.
++4. Slot `+0x0C` therefore dispatches to root method `0x00168480`.
++5. That method sees the already-created internal device at object `+0x14` and
++   returns `0x800401F1`.
++
++Retail `0x00116EC0` expects QueryInterface(IID `0x001E391C`) to return the
++secondary interface.  On that interface, slot `+0x0C` is `0x00168400`, not
++`0x00168480`.
++
++## Retail QueryInterface proof
++
++Exact retail code at `0x00168310` compares the requested IID against several
++16-byte GUIDs.  Its first structural comparison is:
++
++```asm
++00168321 xor  edx, edx
++00168323 mov  ecx, 4
++00168328 mov  edi, 001E4C94
++0016832D mov  esi, eax
++0016832F repz cmpsd
++00168331 sete dl
++00168334 test dl, dl
++00168336 jne  001683E2
++```
++
++The requested IID for the failing call is `0x001E391C`.  Later in the same
++function retail has a direct/same-GUID path for that IID:
++
++```asm
++00168362 cmp  eax, 001E391C
++00168367 je   00168380
++...
++00168380 mov  eax, [esp+0C]
++0016838C add  eax, 4
++0016838F mov  [ecx], eax
++```
++
++So the correct returned interface is `this + 4`, i.e. `0x0107FE34` for the
++observed object.  Its vtable at object `+4` is `0x001E3A5C`, whose `+0x0C` slot
++is the separately proven retail method at `0x00168400`.
++
++The observed root pointer `0x0107FE30` is exactly the return path at
++`0x001683E2`, which is used for the root/identity GUIDs.
++
++## xboxrecomp semantic mismatch
++
++Pinned xboxrecomp already has executable lifts for repeated word/dword string
++comparisons.  Its CMPSW/CMPSD lift performs the comparisons, advances ESI/EDI,
++decrements ECX, and writes the final equality state to `_flags`.
++
++The block-level flag tracker is narrower.  In the pinned revision it recognizes
++only `cmpsb`/`scasb` spellings in a `rep*` instruction as the new flag producer.
++It does not recognize `cmpsw`, `cmpsd`, `scasw`, or `scasd`.
++
++That matters here because `sete dl` is not emitted in isolation when the block
++tracker thinks it knows the last EFLAGS producer.  Since `repz cmpsd` is
++incorrectly treated as flag-preserving, the tracker walks past it and retains
++the preceding `xor edx, edx` as the producer.  XOR-self sets ZF, so `sete dl`
++becomes true regardless of the GUID data actually compared.  JSRF therefore
++takes the first root-interface match path and returns `this` instead of
++`this + 4`.
++
++This matches every observed runtime fact without changing or bypassing guest
++DirectSound behavior.
++
++## v24 correction
++
++v24 changes only xboxrecomp's repeated-string **flag tracking** in the pinned
++toolkit.  The tracker now recognizes the same six comparison widths already
++implemented by the instruction lifter:
++
++- `cmpsb`, `cmpsw`, `cmpsd`
++- `scasb`, `scasw`, `scasd`
++
++The comparison loops themselves are unchanged.  No HRESULT is forced, no IID is
++special-cased in host code, and no JSRF function is replaced.
++
++The expected consequence for this exact retail sequence is that `sete dl`
++consumes the `_flags` value produced by `repz cmpsd`, allowing the real GUID
++comparison to choose the secondary `this + 4` interface naturally.
+diff --git a/scripts/jsrf_xboxrecomp.py b/scripts/jsrf_xboxrecomp.py
+index 99832db..c989bd1 100755
+--- a/scripts/jsrf_xboxrecomp.py
++++ b/scripts/jsrf_xboxrecomp.py
+@@ -138,6 +138,50 @@ def patch_xboxrecomp_lock_xadd_flags(toolkit_dir: str | Path) -> None:
+     path.write_text(text, encoding="utf-8")
+ 
+ 
++def patch_xboxrecomp_repeated_string_compare_flags(toolkit_dir: str | Path) -> None:
++    """Track REP CMPS/SCAS word+dword flags in the pinned block lifter.
++
++    The pinned instruction lift already executes CMPSW/CMPSD/SCASW/SCASD and
++    stores the final equality result in ``_flags``.  Its block-level flag
++    tracker, however, only recognizes the byte spellings as flag producers.
++    A following SETcc/Jcc can therefore be rebuilt from an older instruction
++    instead of the repeated comparison.  JSRF's DirectSound QueryInterface at
++    retail 0x00168310 has exactly ``xor edx, edx; ...; repz cmpsd; sete dl``;
++    stale XOR flags make the first GUID appear to match unconditionally.
++
++    Do not change the comparison loop itself.  Make the tracker recognize the
++    same CMPS/SCAS widths that the pinned instruction lift already implements.
++    """
++    toolkit_dir = Path(toolkit_dir)
++    path = toolkit_dir / "tools" / "recomp" / "lifter.py"
++    if not path.is_file():
++        raise FileNotFoundError(f"xboxrecomp lifter was not found: {path}")
++
++    text = path.read_text(encoding="utf-8")
++    marker = "_REPE_COMPARE_FLAG_MNEMONICS = ("
++    if marker in text:
++        return
++
++    # Refuse to paper over an upstream shape change.  The pinned lifter must
++    # already have real wide CMPS/SCAS execution before flag tracking is safe.
++    if ('if "cmpsw" in m or "cmpsd" in m:' not in text
++            or 'if "scasw" in m or "scasd" in m:' not in text):
++        raise RuntimeError(
++            "Pinned xboxrecomp no longer contains the expected wide CMPS/SCAS lift"
++        )
++
++    old = '            # rep movsb/movsd = data copy, preserves flags\n            # repe cmpsb/repne scasb = comparison, sets flags\n            rest = curr.op_str.strip() if hasattr(curr, \'op_str\') else ""\n            raw_m = curr.mnemonic\n            if "cmpsb" in raw_m or "scasb" in raw_m:\n                last_flag_setter = raw_m\n                last_flag_ops = list(curr.operands)\n            elif "cmpsb" in rest or "scasb" in rest:\n                last_flag_setter = raw_m\n                last_flag_ops = list(curr.operands)\n            else:\n                pass  # rep movs/stos = data movement, flags preserved\n'
++    new = '            # rep movs/stos = data movement, preserves flags.  Every CMPS/SCAS\n            # width implemented by lift_instruction is a comparison and sets flags.\n            rest = curr.op_str.strip() if hasattr(curr, \'op_str\') else ""\n            raw_m = curr.mnemonic\n            _REPE_COMPARE_FLAG_MNEMONICS = (\n                "cmpsb", "cmpsw", "cmpsd",\n                "scasb", "scasw", "scasd",\n            )\n            if any(name in raw_m for name in _REPE_COMPARE_FLAG_MNEMONICS):\n                last_flag_setter = raw_m\n                last_flag_ops = list(curr.operands)\n            elif any(name in rest for name in _REPE_COMPARE_FLAG_MNEMONICS):\n                last_flag_setter = raw_m\n                last_flag_ops = list(curr.operands)\n            else:\n                pass  # rep movs/stos = data movement, flags preserved\n'
++
++    count = text.count(old)
++    if count != 1:
++        raise RuntimeError(
++            "Pinned xboxrecomp repeated-string flag patch no longer matches lifter.py "
++            f"(tracker occurrences={count})"
++        )
++    path.write_text(text.replace(old, new, 1), encoding="utf-8")
++
++
+ def pin_jsrf_function_boundaries(functions_path: str | Path) -> None:
+     """Pin retail-proven JSRF boundaries that generic seed recovery can weaken.
+ 
+@@ -543,6 +587,7 @@ def run_pipeline(
+     gen_dir = project_root / "recomp" / "src" / "recomp" / "gen"
+     gen_dir.mkdir(parents=True, exist_ok=True)
+     patch_xboxrecomp_lock_xadd_flags(toolkit_dir)
++    patch_xboxrecomp_repeated_string_compare_flags(toolkit_dir)
+     commands = build_pipeline_commands(toolkit_dir, game_dir, project_root, python_exe)
+     for index, command in enumerate(commands):
+         subprocess.run(command, cwd=toolkit_dir, check=True)
+diff --git a/tests/test_v24_repeated_wide_string_flags.py b/tests/test_v24_repeated_wide_string_flags.py
+new file mode 100644
+index 0000000..1a0605a
+--- /dev/null
++++ b/tests/test_v24_repeated_wide_string_flags.py
+@@ -0,0 +1,63 @@
++from pathlib import Path
++
++
++def root() -> Path:
++    return Path(__file__).resolve().parents[1]
++
++
++def _pinned_tracker_fixture() -> str:
++    return '''\
++if "cmpsw" in m or "cmpsd" in m:
++    pass
++if "scasw" in m or "scasd" in m:
++    pass
++
++        elif curr.mnemonic.startswith("rep"):
++            # rep movsb/movsd = data copy, preserves flags
++            # repe cmpsb/repne scasb = comparison, sets flags
++            rest = curr.op_str.strip() if hasattr(curr, 'op_str') else ""
++            raw_m = curr.mnemonic
++            if "cmpsb" in raw_m or "scasb" in raw_m:
++                last_flag_setter = raw_m
++                last_flag_ops = list(curr.operands)
++            elif "cmpsb" in rest or "scasb" in rest:
++                last_flag_setter = raw_m
++                last_flag_ops = list(curr.operands)
++            else:
++                pass  # rep movs/stos = data movement, flags preserved
++'''
++
++
++def test_v24_patch_tracks_wide_repeated_string_comparisons(tmp_path):
++    from scripts.jsrf_xboxrecomp import patch_xboxrecomp_repeated_string_compare_flags
++
++    toolkit = tmp_path / "xboxrecomp"
++    lifter = toolkit / "tools" / "recomp" / "lifter.py"
++    lifter.parent.mkdir(parents=True)
++    lifter.write_text(_pinned_tracker_fixture(), encoding="utf-8")
++
++    patch_xboxrecomp_repeated_string_compare_flags(toolkit)
++    patched = lifter.read_text(encoding="utf-8")
++
++    # The wide forms already assign _flags in the pinned instruction lift; the
++    # missing piece is telling the block-level SETcc/Jcc tracker that those
++    # instructions, too, are the most recent flag producer.
++    for mnemonic in ("cmpsb", "cmpsw", "cmpsd", "scasb", "scasw", "scasd"):
++        assert mnemonic in patched
++    assert 'for name in _REPE_COMPARE_FLAG_MNEMONICS' in patched
++    assert 'name in raw_m' in patched
++    assert 'name in rest' in patched
++
++    # Applying the toolkit correction twice must not mutate the file again.
++    once = patched
++    patch_xboxrecomp_repeated_string_compare_flags(toolkit)
++    assert lifter.read_text(encoding="utf-8") == once
++
++
++def test_v24_pipeline_applies_wide_string_flag_patch_before_disassembly():
++    source = (root() / "scripts" / "jsrf_xboxrecomp.py").read_text(encoding="utf-8")
++    run_pipeline = source[source.index("def run_pipeline("):]
++    patch_call = "patch_xboxrecomp_repeated_string_compare_flags(toolkit_dir)"
++    commands = "commands = build_pipeline_commands"
++    assert patch_call in run_pipeline
++    assert run_pipeline.index(patch_call) < run_pipeline.index(commands)
