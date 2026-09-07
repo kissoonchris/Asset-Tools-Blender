@@ -1,0 +1,356 @@
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=build' '--exclude=build_verify' /mnt/data/jsrf_work/base_v15/recomp/src/recomp_manual.c /mnt/data/jsrf_work/src/recomp/src/recomp_manual.c
+--- /mnt/data/jsrf_work/base_v15/recomp/src/recomp_manual.c	2026-09-06 21:35:48.000000000 +0000
++++ /mnt/data/jsrf_work/src/recomp/src/recomp_manual.c	2026-09-07 01:49:37.819805549 +0000
+@@ -62,6 +62,103 @@
+     return (recomp_func_t)0;
+ }
+ 
++static int jsrf_guest_read_u32(uint32_t va, uint32_t *value)
++{
++    if (!value || !g_xbox_mem_offset || va < 0x00001000u || va > 0x03FFFFFCu) {
++        return 0;
++    }
++    *value = GUEST_U32(va);
++    return 1;
++}
++
++static int jsrf_guest_read_u16(uint32_t va, uint16_t *value)
++{
++    if (!value || !g_xbox_mem_offset || va < 0x00001000u || va > 0x03FFFFFEu) {
++        return 0;
++    }
++    *value = *(const uint16_t *)((uintptr_t)g_xbox_mem_offset + va);
++    return 1;
++}
++
++/*
++ * v16 diagnostic probe for retail heap allocator 0x001497DC.
++ *
++ * The v15 watchdog snapshot ended after a successful EnterCriticalSection with
++ * registers matching one of the allocator's sorted large-free-list walks.
++ * Function-level tracing cannot distinguish those near-identical loops.  The
++ * generated source therefore calls this observer only at seven retail branch
++ * targets.  It never writes a guest register or guest memory.
++ *
++ * Each site prints the first four visits, then powers of two.  A self-linked
++ * or short-cycle free-list therefore becomes obvious without filling the log.
++ */
++void jsrf_heap_probe(uint32_t va)
++{
++    enum { SLOT_COUNT = 16 };
++    static uint32_t sites[SLOT_COUNT];
++    static uint64_t hits[SLOT_COUNT];
++    static int count;
++    uint32_t sentinel = 0;
++    uint32_t sentinel_next = 0;
++    uint32_t sentinel_prev = 0;
++    uint32_t node_next = 0;
++    uint32_t node_prev = 0;
++    uint16_t node_units = 0;
++    int have_sentinel = 0;
++    int have_node = 0;
++    int i;
++
++    for (i = 0; i < count; ++i) {
++        if (sites[i] == va) {
++            break;
++        }
++    }
++    if (i == count) {
++        if (count == SLOT_COUNT) {
++            return;
++        }
++        sites[count] = va;
++        hits[count] = 0;
++        ++count;
++    }
++
++    ++hits[i];
++    if (hits[i] > 4 && (hits[i] & (hits[i] - 1)) != 0) {
++        return;
++    }
++
++    if (g_ebx <= 0x03FFFE7Fu) {
++        sentinel = g_ebx + 0x180u;
++        have_sentinel =
++            jsrf_guest_read_u32(sentinel, &sentinel_next) &&
++            jsrf_guest_read_u32(sentinel + 4u, &sentinel_prev);
++    }
++    if (g_eax >= 0x00001008u && g_eax <= 0x03FFFFF8u) {
++        have_node =
++            jsrf_guest_read_u32(g_eax, &node_next) &&
++            jsrf_guest_read_u32(g_eax + 4u, &node_prev) &&
++            jsrf_guest_read_u16(g_eax - 8u, &node_units);
++    }
++
++    fprintf(stderr,
++            "[HEAPPROBE] va=%08X hit=%llu esp=%08X eax=%08X ecx=%08X "
++            "edx=%08X ebx=%08X esi=%08X edi=%08X",
++            va, (unsigned long long)hits[i], g_esp, g_eax, g_ecx,
++            g_edx, g_ebx, g_esi, g_edi);
++    if (have_node) {
++        fprintf(stderr,
++                " node=%08X node_next=%08X node_prev=%08X units=%u",
++                g_eax, node_next, node_prev, (unsigned)node_units);
++    }
++    if (have_sentinel) {
++        fprintf(stderr,
++                " sentinel=%08X sentinel_next=%08X sentinel_prev=%08X",
++                sentinel, sentinel_next, sentinel_prev);
++    }
++    fputc('\n', stderr);
++    fflush(stderr);
++}
++
+ static uint32_t current_icall_return_address(void)
+ {
+     if (!g_xbox_mem_offset || !g_esp) {
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=build' '--exclude=build_verify' /mnt/data/jsrf_work/base_v15/research/JSRF_V15_HEAP_FREELIST_STALL.md /mnt/data/jsrf_work/src/research/JSRF_V15_HEAP_FREELIST_STALL.md
+--- /mnt/data/jsrf_work/base_v15/research/JSRF_V15_HEAP_FREELIST_STALL.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/jsrf_work/src/research/JSRF_V15_HEAP_FREELIST_STALL.md	2026-09-07 01:52:01.916605784 +0000
+@@ -0,0 +1,77 @@
++# JSRF v15 watchdog: retail heap free-list stall
++
++Date: 2026-09-06
++Retail XBE: Jet Set Radio Future, title ID `0x5345000A`
++Retail XBE SHA-256: `fd19055756719893c466302809b433b785ecf5732df0441286f3f605f0f3ef9c`
++
++## What the v15 Windows trace proves
++
++The v15 run reaches the real retail allocator `sub_001497DC` from `0x0017C926`
++with a 0x10-byte request.  The allocator then calls the Xbox critical-section
++entry thunk at retail `0x00149828`.  The kernel trace reports a successful
++`take 0x00F80610` and immediately returns to guest code.
++
++The 60-second watchdog fires after that successful lock acquisition.  There is
++no matching `drop 0x00F80610` for this final allocator invocation and no
++`[TRACE] <- sub_001497DC` line.
++
++This rules out the earlier working hypothesis that the watchdog was simply
++waiting inside `EnterCriticalSection`: the critical-section call completed.
++Execution is spending the watchdog interval later in the allocator while the
++heap lock is still held.
++
++## Retail allocator mapping
++
++Direct disassembly of the exact retail XBE maps the allocator's large free-list
++logic as follows:
++
++- `0x00149828` - enter the heap critical section
++- `0x00149832` - first instruction after successful lock acquisition
++- `0x001499B3` - begin the large-free-list search
++- `0x00149A1D` - unlink the selected large free block
++- `0x00149B1A` - first reinsertion path
++- `0x00149B28` - first sorted large-list walk loop
++- `0x00149C09` - second sorted large-list walk loop
++- `0x00149D5B` - third sorted large-list walk loop
++- `0x00149DD8` - critical-section leave path
++- `0x00149DDE` / `0x00149F45` - normal allocator return path / final epilogue
++
++The watchdog register sample is consistent with one of the sorted large-list
++walks: `ebx=0x00F80000` is the heap base, `ecx=0x00F80180` is exactly the
++large-list sentinel (`heap + 0x180`), and the live `eax/edi/esi/edx` values have
++the shape of the node pointer, node header and remainder-size values used by
++those loops.
++
++That makes a malformed/cyclic large free list the strongest current hypothesis,
++but v15 does not contain enough live link data to prove which loop is repeating
++or which node first becomes malformed.  Do not replace the allocator or change
++synchronization semantics on this evidence alone.
++
++## v16 diagnostic
++
++v16 adds a diagnostic-only generated-code probe at the seven exact retail
++landmarks above.  `jsrf_heap_probe()` records:
++
++- probe VA and hit count;
++- guest ESP and general registers;
++- current list node address;
++- node `next` / `prev` links and size units;
++- large-list sentinel address and its `next` / `prev` links.
++
++The callback only reads guest state.  It does not modify guest registers, heap
++memory, critical-section state, allocator branching, input, rendering, or game
++logic.  Logging is throttled after the first few hits so an actual loop remains
++observable without filling the log indefinitely.
++
++## What the next Windows run will distinguish
++
++- Repeated `HEAPPROBE` hits at one loop VA with the same node/link tuple proves a
++  self-loop or stationary walk.
++- Alternating/repeating node tuples prove a short cycle and identify its exact
++  members.
++- Monotonically changing nodes with no repetition points away from list
++  corruption and toward a different long-running allocator path.
++- If the probe reaches `0x00149DD8`, the allocator itself escaped and the stall
++  is downstream instead.
++
++No gameplay implementation is changed by this diagnostic.
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=build' '--exclude=build_verify' /mnt/data/jsrf_work/base_v15/scripts/jsrf_xboxrecomp.py /mnt/data/jsrf_work/src/scripts/jsrf_xboxrecomp.py
+--- /mnt/data/jsrf_work/base_v15/scripts/jsrf_xboxrecomp.py	2026-09-07 01:30:06.000000000 +0000
++++ /mnt/data/jsrf_work/src/scripts/jsrf_xboxrecomp.py	2026-09-07 01:49:37.212842768 +0000
+@@ -28,6 +28,17 @@
+ THUNK_DEBUG_XOR = 0xEFB1F152
+ 
+ 
++JSRF_HEAP_PROBE_VAS = (
++    0x00149832,  # immediately after successful heap critical-section enter
++    0x001499B3,  # begin large-free-list search
++    0x00149A1D,  # unlink selected large free block
++    0x00149B1A,  # begin first large-list reinsertion path
++    0x00149B28,  # first sorted large-list walk loop
++    0x00149C09,  # second sorted large-list walk loop
++    0x00149D5B,  # third sorted large-list walk loop
++)
++
++
+ JSRF_RETAIL_FUNCTION_BOUNDARIES = (
+     {
+         "start": 0x00160080,
+@@ -105,6 +116,66 @@
+     path.write_text(json.dumps(functions, indent=2) + "\n", encoding="utf-8")
+ 
+ 
++def instrument_jsrf_heap_allocator_probe(gen_dir: str | Path) -> None:
++    """Inject diagnostic-only probes at retail heap allocator loop landmarks.
++
++    The v15 watchdog registers match the large free-list walk in 0x001497DC,
++    but function-entry tracing cannot identify which of the three equivalent
++    walks is spinning.  Insert calls only at measured branch-target labels in
++    that generated retail function.  The callback reads/logs guest state but
++    does not modify any guest register or memory.
++    """
++    import re
++
++    gen_dir = Path(gen_dir)
++    signature = "void sub_001497DC(void)"
++    declaration = "extern void jsrf_heap_probe(uint32_t va);"
++    found_function = False
++    injected = set()
++
++    for source in sorted(gen_dir.glob("recomp_*.c")):
++        text = source.read_text(encoding="utf-8", errors="replace")
++        start = text.find(signature)
++        if start < 0:
++            continue
++        found_function = True
++        next_function = text.find("\n/**", start + len(signature))
++        end = len(text) if next_function < 0 else next_function
++        body = text[start:end]
++
++        if "jsrf_heap_probe(" in body:
++            # A previously instrumented generation is already complete.
++            return
++
++        for va in JSRF_HEAP_PROBE_VAS:
++            label_re = re.compile(
++                rf"(?mi)^(?P<label>loc_{va:08X}:\s*;?\s*)$"
++            )
++            replacement = (
++                rf"\g<label>\n    jsrf_heap_probe(0x{va:08X}u);"
++            )
++            body, count = label_re.subn(replacement, body, count=1)
++            if count:
++                injected.add(va)
++
++        missing = set(JSRF_HEAP_PROBE_VAS) - injected
++        if missing:
++            rendered = ", ".join(f"0x{va:08X}" for va in sorted(missing))
++            raise RuntimeError(
++                "Generated sub_001497DC is missing retail heap probe label(s): "
++                + rendered
++            )
++
++        if declaration not in text[:start]:
++            body = declaration + "\n" + body
++        text = text[:start] + body + text[end:]
++        source.write_text(text, encoding="utf-8")
++        return
++
++    if not found_function:
++        raise RuntimeError("Generated sub_001497DC was not found for v16 heap probing")
++
++
+ def verify_jsrf_generated_contracts(gen_dir: str | Path) -> None:
+     """Fail the build if codegen loses a retail-proven JSRF stack contract."""
+     import re
+@@ -338,6 +409,7 @@
+             functions_path = toolkit_dir / "tools" / "disasm" / "output" / "functions.json"
+             pin_jsrf_function_boundaries(functions_path)
+         elif index == 3:
++            instrument_jsrf_heap_allocator_probe(gen_dir)
+             verify_jsrf_generated_contracts(gen_dir)
+ 
+ 
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=build' '--exclude=build_verify' /mnt/data/jsrf_work/base_v15/tests/test_jsrf_xboxrecomp.py /mnt/data/jsrf_work/src/tests/test_jsrf_xboxrecomp.py
+--- /mnt/data/jsrf_work/base_v15/tests/test_jsrf_xboxrecomp.py	2026-09-07 01:29:52.000000000 +0000
++++ /mnt/data/jsrf_work/src/tests/test_jsrf_xboxrecomp.py	2026-09-07 01:49:10.875426945 +0000
+@@ -122,6 +122,68 @@
+ 
+ 
+ class JSRFTraceProbeTests(unittest.TestCase):
++    def test_v16_heap_probe_instruments_only_retail_allocator_loop_landmarks(self):
++        import scripts.jsrf_xboxrecomp as driver
++        instrument = getattr(driver, "instrument_jsrf_heap_allocator_probe", None)
++        self.assertIsNotNone(
++            instrument,
++            "v16 must add focused basic-block probes to the retail heap allocator",
++        )
++        generated = r"""
++void sub_001497DC(void)
++{
++loc_001497DC: ;
++    eax = 1;
++loc_00149832: ;
++    eax = 2;
++loc_001499B3: ;
++    eax = 3;
++loc_00149A1D: ;
++    eax = 4;
++loc_00149B1A: ;
++    eax = 5;
++loc_00149B28: ;
++    eax = 6;
++loc_00149C09: ;
++    eax = 7;
++loc_00149D5B: ;
++    eax = 8;
++}
++/** next */
++void sub_00150000(void)
++{
++loc_00149B28: ;
++}
++"""
++        with tempfile.TemporaryDirectory() as td:
++            gen_dir = Path(td)
++            source = gen_dir / "recomp_0000.c"
++            source.write_text(generated, encoding="utf-8")
++            instrument(gen_dir)
++            once = source.read_text(encoding="utf-8")
++            instrument(gen_dir)
++            twice = source.read_text(encoding="utf-8")
++
++        self.assertEqual(once, twice, "heap probe injection must be idempotent")
++        self.assertEqual(once.count("extern void jsrf_heap_probe(uint32_t va);"), 1)
++        for va in driver.JSRF_HEAP_PROBE_VAS:
++            self.assertEqual(
++                once.count(f"jsrf_heap_probe(0x{va:08X}u);"),
++                1,
++                f"missing focused heap probe at 0x{va:08X}",
++            )
++        unrelated = once.split("void sub_00150000(void)", 1)[1]
++        self.assertNotIn("jsrf_heap_probe", unrelated)
++
++    def test_v16_heap_probe_runtime_dumps_list_links_without_changing_guest_state(self):
++        root = Path(__file__).resolve().parents[1]
++        manual_c = (root / "recomp" / "src" / "recomp_manual.c").read_text(encoding="utf-8")
++        self.assertIn("void jsrf_heap_probe(uint32_t va)", manual_c)
++        self.assertIn("[HEAPPROBE]", manual_c)
++        self.assertIn("sentinel", manual_c)
++        self.assertIn("node_next", manual_c)
++        self.assertIn("node_prev", manual_c)
++
+     def test_trace_probe_covers_v14_watchdog_directinput_and_heap_chain(self):
+         root = Path(__file__).resolve().parents[1]
+         path = root / "recomp" / "jsrf_trace_functions.json"
