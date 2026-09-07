@@ -1,0 +1,300 @@
+--- /mnt/data/jsrf_v12src/scripts/jsrf_xboxrecomp.py	2026-09-06 23:24:10.000000000 +0000
++++ /mnt/data/jsrf_v13work/scripts/jsrf_xboxrecomp.py	2026-09-06 23:56:12.877794254 +0000
+@@ -30,6 +30,11 @@
+ 
+ JSRF_RETAIL_FUNCTION_BOUNDARIES = (
+     {
++        "start": 0x00160080,
++        "end": 0x00160106,
++        "called_by": 0x0015FC40,
++    },
++    {
+         "start": 0x00178A00,
+         "end": 0x00178B2B,
+         "called_by": 0x00176630,
+@@ -104,33 +109,43 @@
+     """Fail the build if codegen loses a retail-proven JSRF stack contract."""
+     import re
+ 
++    contracts = (
++        ("sub_00160080", ("16", "12"), "ret 0x0C"),
++        ("sub_00178A00", ("28", "24"), "ret 0x18"),
++    )
+     gen_dir = Path(gen_dir)
+-    signature = "void sub_00178A00(void)"
+-    for source in sorted(gen_dir.glob("recomp_*.c")):
+-        text = source.read_text(encoding="utf-8", errors="replace")
+-        start = text.find(signature)
+-        if start < 0:
+-            continue
+-        next_function = text.find("\n/**", start + len(signature))
+-        body = text[start:] if next_function < 0 else text[start:next_function]
+-        returns = re.findall(
+-            r"esp \+= (\d+); return; /\* ret (\d+) \*/",
+-            body,
+-        )
+-        if not returns:
+-            raise RuntimeError(
+-                "Generated sub_00178A00 has no decoded retail return contract"
++    sources = [
++        source.read_text(encoding="utf-8", errors="replace")
++        for source in sorted(gen_dir.glob("recomp_*.c"))
++    ]
++
++    for name, expected, retail_name in contracts:
++        signature = f"void {name}(void)"
++        found = False
++        for text in sources:
++            start = text.find(signature)
++            if start < 0:
++                continue
++            found = True
++            next_function = text.find("\n/**", start + len(signature))
++            body = text[start:] if next_function < 0 else text[start:next_function]
++            returns = re.findall(
++                r"esp \+= (\d+); return; /\* ret (\d+) \*/",
++                body,
+             )
+-        wrong = [pair for pair in returns if pair != ("28", "24")]
+-        if wrong:
+-            raise RuntimeError(
+-                "Generated sub_00178A00 lost its retail ret 0x18 cleanup: "
+-                + ", ".join(f"esp+={esp}/ret {ret}" for esp, ret in wrong)
+-            )
+-        return
+-
+-    raise RuntimeError("Generated sub_00178A00 was not found in recomp output")
+-
++            if not returns:
++                raise RuntimeError(
++                    f"Generated {name} has no decoded retail return contract"
++                )
++            wrong = [pair for pair in returns if pair != expected]
++            if wrong:
++                raise RuntimeError(
++                    f"Generated {name} lost its retail {retail_name} cleanup: "
++                    + ", ".join(f"esp+={esp}/ret {ret}" for esp, ret in wrong)
++                )
++            break
++        if not found:
++            raise RuntimeError(f"Generated {name} was not found in recomp output")
+ 
+ def _u32(data: bytes, offset: int) -> int:
+     if offset < 0 or offset + 4 > len(data):
+--- /mnt/data/jsrf_v12src/recomp/jsrf_runtime_seeds.json	2026-09-06 22:42:26.000000000 +0000
++++ /mnt/data/jsrf_v13work/recomp/jsrf_runtime_seeds.json	2026-09-06 23:56:12.878020218 +0000
+@@ -12,6 +12,90 @@
+     "note": "Retail vtable-only method stored at 0x001E13FC. v9 ABI diagnostics show corrupted callee-saved state and ESP. Clear standalone boundary after 0x0015A018 ret 0x0C + padding."
+   },
+   {
++    "start": "0x0015FD40",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x0015FE60",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x0015FF10",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x0015FF60",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x0015FF80",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x0015FFB0",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x0015FFE0",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00160080",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x001603B0",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00160470",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00160550",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00160610",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x001608A0",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00160CE0",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00160D80",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00160E80",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00160EA0",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00161890",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00161B00",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00161C20",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
++    "start": "0x00177FE0",
++    "note": "Retail method in constructor-installed vtable 0x001E1900. v12 runtime first corrupts guest object state at this interface before later null calls; seed the complete proven vtable as real callable entries."
++  },
++  {
+     "start": "0x00178A00",
+     "note": "Retail vtable-only method at vtable 0x001E4020 + 0x0C. v10 ABI evidence shows caller 0x00176630 returns with corrupted ESI/EDI/stack; static retail resolution proves its indirect call at 0x00176673 targets 0x00178A00, whose standalone body ends with ret 0x18."
+   },
+@@ -56,10 +140,6 @@
+     "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+   },
+   {
+-    "start": "0x001BDAA9",
+-    "note": "Observed unresolved indirect-call target in XPP section in JSRF native run 2026-09-06."
+-  },
+-  {
+     "start": "0x0018E410",
+     "note": "Observed unresolved indirect-call target in D3D section in JSRF native run 2026-09-06."
+   },
+@@ -70,5 +150,9 @@
+   {
+     "start": "0x001A52A4",
+     "note": "Observed unresolved indirect-call target in DSOUND section in JSRF native run 2026-09-06."
++  },
++  {
++    "start": "0x001BDAA9",
++    "note": "Observed unresolved indirect-call target in XPP section in JSRF native run 2026-09-06."
+   }
+ ]
+--- /mnt/data/jsrf_v12src/tests/test_jsrf_xboxrecomp.py	2026-09-06 23:23:50.000000000 +0000
++++ /mnt/data/jsrf_v13work/tests/test_jsrf_xboxrecomp.py	2026-09-06 23:56:26.352487656 +0000
+@@ -191,6 +191,11 @@
+             "the Windows build must audit the generated retail stack contract before running",
+         )
+         generated = r"""
++void sub_00160080(void)
++{
++    esp += 16; return; /* ret 12 */
++}
++/** next */
+ void sub_00178A00(void)
+ {
+ loc_00178A00: ;
+@@ -209,6 +214,69 @@
+ 
+ 
+ 
++
++    def test_pins_xdk_com_queryinterface_vtable_method_as_standalone_function(self):
++        import scripts.jsrf_xboxrecomp as driver
++        functions = [
++            {
++                "start": "0x00160050", "end": "0x00160110", "size": 0xC0,
++                "name": "sub_00160050", "section": ".text", "confidence": 0.9,
++                "detection_method": "data_pointer_alias", "num_instructions": 40,
++                "has_prologue": False, "calls_to": [], "called_by": [],
++            },
++            {
++                "start": "0x00160080", "end": "0x00160110", "size": 0x90,
++                "name": "sub_00160080", "section": ".text", "confidence": 0.95,
++                "detection_method": "seed_vtable_thunk", "num_instructions": 30,
++                "has_prologue": False, "calls_to": [], "called_by": [],
++            },
++            {
++                "start": "0x00160110", "end": "0x00160190", "size": 0x80,
++                "name": "sub_00160110", "section": ".text", "confidence": 0.9,
++                "detection_method": "cc_boundary", "num_instructions": 20,
++                "has_prologue": False, "calls_to": [], "called_by": [],
++            },
++        ]
++        with tempfile.TemporaryDirectory() as td:
++            db = Path(td) / "functions.json"
++            db.write_text(json.dumps(functions, indent=2), encoding="utf-8")
++            driver.pin_jsrf_function_boundaries(db)
++            patched = json.loads(db.read_text(encoding="utf-8"))
++        by_start = {int(f["start"], 16): f for f in patched}
++        method = by_start[0x00160080]
++        self.assertEqual(method["end"], "0x00160106")
++        self.assertEqual(method["size"], 0x86)
++        self.assertEqual(method["detection_method"], "jsrf_retail_boundary")
++        self.assertIn("0x0015fc40", method["called_by"])
++
++    def test_generated_xdk_com_queryinterface_keeps_retail_ret_0c_cleanup(self):
++        import scripts.jsrf_xboxrecomp as driver
++        generated = r"""
++void sub_00160080(void)
++{
++loc_00160080: ;
++    PUSH32(esp, esi);
++loc_001600D8: ;
++    POP32(esp, edi);
++    POP32(esp, esi);
++    esp += 16; return; /* ret 12 */
++loc_001600DD: ;
++    POP32(esp, edi);
++    POP32(esp, esi);
++    esp += 16; return; /* ret 12 */
++}
++/** next */
++void sub_00178A00(void)
++{
++    esp += 28; return; /* ret 24 */
++}
++"""
++        with tempfile.TemporaryDirectory() as td:
++            gen_dir = Path(td)
++            (gen_dir / "recomp_0000.c").write_text(generated, encoding="utf-8")
++            driver.verify_jsrf_generated_contracts(gen_dir)
++
++
+ class RecompProjectStructureTests(unittest.TestCase):
+ 
+     def test_runtime_seed_file_contains_only_measured_function_entry_targets(self):
+@@ -239,6 +307,18 @@
+         # alias instead of a true function, its six-argument cleanup is lost
+         # and 0x00176630 pops EDI/ESI from the wrong guest-stack positions.
+         self.assertIn("0x00178a00", starts)
++        # v12 runtime shows the first object corruption begins when the
++        # constructor-installed vtable at 0x001E1900 dispatches QueryInterface
++        # to 0x00160080. Seed the complete proven vtable so its methods are
++        # built as callable entries rather than weak data-pointer aliases.
++        self.assertTrue({
++            "0x00160080", "0x00177fe0", "0x0015fd40", "0x0015ff10",
++            "0x0015ff60", "0x00161c20", "0x001603b0", "0x00160ce0",
++            "0x0015fe60", "0x00161890", "0x00160470", "0x00160d80",
++            "0x0015ff80", "0x00160550", "0x00160610", "0x00161b00",
++            "0x0015ffb0", "0x0015ffe0", "0x00160ea0", "0x00160e80",
++            "0x001608a0",
++        }.issubset(starts))
+ 
+     def test_manual_functions_pin_retail_memmove(self):
+         root = Path(__file__).resolve().parents[1]
