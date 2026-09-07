@@ -1,0 +1,92 @@
+diff -ruN patch_v24/recomp/jsrf_runtime_seeds.json patch_v25/recomp/jsrf_runtime_seeds.json
+--- patch_v24/recomp/jsrf_runtime_seeds.json	2026-09-07 17:13:20.444621463 +0000
++++ patch_v25/recomp/jsrf_runtime_seeds.json	2026-09-07 17:13:20.447903937 +0000
+@@ -112,6 +112,10 @@
+     "note": "Retail vtable-only method at vtable 0x001E4020 + 0x0C. v10 ABI evidence shows caller 0x00176630 returns with corrupted ESI/EDI/stack; static retail resolution proves its indirect call at 0x00176673 targets 0x00178A00, whose standalone body ends with ret 0x18."
+   },
+   {
++    "start": "0x00178F40",
++    "note": "Retail indirect-only method called through slot +0x10 at 0x0017702F from function 0x00176F70. v24 runtime first reaches it as unresolved target 0x00178F40 immediately before downstream guest-state corruption. Retail body is padding-delimited at 0x00178F40..0x001791BB and exits with ret 0x14."
++  },
++  {
+     "start": "0x0018AFB0",
+     "note": "Observed unresolved indirect-call target in JSRF native run 2026-09-06."
+   },
+diff -ruN patch_v24/recomp/jsrf_trace_functions.json patch_v25/recomp/jsrf_trace_functions.json
+--- patch_v24/recomp/jsrf_trace_functions.json	2026-09-07 17:13:20.445681613 +0000
++++ patch_v25/recomp/jsrf_trace_functions.json	2026-09-07 17:13:20.448898889 +0000
+@@ -28,5 +28,6 @@
+   "0x00168400",
+   "0x00168480",
+   "0x001BB690",
+-  "0x001BB750"
++  "0x001BB750",
++  "0x00178F40"
+ ]
+diff -ruN patch_v24/research/JSRF_V24_XFILE_INDIRECT_METHOD.md patch_v25/research/JSRF_V24_XFILE_INDIRECT_METHOD.md
+--- patch_v24/research/JSRF_V24_XFILE_INDIRECT_METHOD.md	1970-01-01 00:00:00.000000000 +0000
++++ patch_v25/research/JSRF_V24_XFILE_INDIRECT_METHOD.md	2026-09-07 17:13:20.450730247 +0000
+@@ -0,0 +1,7 @@
++# JSRF v24: indirect method 0x00178F40
++
++The v24 runtime clears the DirectSound startup failure: sub_00116EC0 and sub_0005F350 both return success and startup proceeds into the game's setup path.
++
++The first new unresolved indirect call is target 0x00178F40 from retail return site 0x00177032. Retail disassembly at 0x00176F70 shows the call at 0x0017702F dispatches slot +0x10 of an interface vtable. The target 0x00178F40 is a standalone padding-delimited function: it starts after NOP padding at 0x00178F40, has multiple internal paths, and exits with `ret 0x14` at 0x001791B8; the next padding begins at 0x001791BB.
++
++v24 skipped that method because it was not in the generated dispatch set. Execution then continued with the method's side effects missing and later faulted while processing guest state in DSOUND function 0x001A19D6. v25 therefore preserves 0x00178F40 as a real callable retail function with exact boundary 0x00178F40..0x001791BB. No return value, HRESULT, or game state is forced.
+diff -ruN patch_v24/scripts/jsrf_xboxrecomp.py patch_v25/scripts/jsrf_xboxrecomp.py
+--- patch_v24/scripts/jsrf_xboxrecomp.py	2026-09-07 17:13:20.446652249 +0000
++++ patch_v25/scripts/jsrf_xboxrecomp.py	2026-09-07 17:13:20.449821744 +0000
+@@ -74,6 +74,11 @@
+         "end": 0x00178B2B,
+         "called_by": 0x00176630,
+     },
++    {
++        "start": 0x00178F40,
++        "end": 0x001791BB,
++        "called_by": 0x00176F70,
++    },
+ )
+ 
+ 
+diff -ruN patch_v24/tests/test_v25_xfile_vtable_boundary.py patch_v25/tests/test_v25_xfile_vtable_boundary.py
+--- patch_v24/tests/test_v25_xfile_vtable_boundary.py	1970-01-01 00:00:00.000000000 +0000
++++ patch_v25/tests/test_v25_xfile_vtable_boundary.py	2026-09-07 17:13:20.451715455 +0000
+@@ -0,0 +1,37 @@
++import json
++from pathlib import Path
++
++
++def root() -> Path:
++    return Path(__file__).resolve().parents[1]
++
++
++def test_v25_seeds_retail_indirect_method_00178f40():
++    seeds = json.loads((root() / 'recomp' / 'jsrf_runtime_seeds.json').read_text(encoding='utf-8'))
++    starts = {int(item['start'], 16) for item in seeds}
++    assert 0x00178F40 in starts
++
++
++def test_v25_pins_retail_indirect_method_boundary(tmp_path):
++    from scripts.jsrf_xboxrecomp import pin_jsrf_function_boundaries
++
++    path = tmp_path / 'functions.json'
++    path.write_text(json.dumps([{
++        'start': '0x00178E70',
++        'end': '0x00179210',
++        'size': 0x3A0,
++        'name': 'sub_00178E70',
++        'section': '.text',
++        'confidence': 0.7,
++        'detection_method': 'generic',
++        'num_instructions': 1,
++        'has_prologue': False,
++        'calls_to': [],
++        'called_by': [],
++    }]), encoding='utf-8')
++
++    pin_jsrf_function_boundaries(path)
++    funcs = {int(f['start'], 16): f for f in json.loads(path.read_text(encoding='utf-8'))}
++    assert int(funcs[0x00178F40]['end'], 16) == 0x001791BB
++    assert funcs[0x00178F40]['detection_method'] == 'jsrf_retail_boundary'
++    assert '0x00176f70' in funcs[0x00178F40]['called_by']
