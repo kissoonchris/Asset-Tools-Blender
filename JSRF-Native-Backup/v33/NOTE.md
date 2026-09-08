@@ -1,0 +1,1 @@
+v33 keeps the generic xboxrecomp DSP acknowledgement title-agnostic and moves configured doorbell servicing onto an asynchronous Windows host worker. The later v34 analysis supersedes v33's first-descriptor address assumption: the retail JSRF command object selects descriptor 12, not descriptor 0.
