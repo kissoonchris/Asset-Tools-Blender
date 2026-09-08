@@ -1,0 +1,216 @@
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=default.xbe' '--exclude=dsound.bin' '--exclude=text.bin' /mnt/data/jsrf_v33_exact_for_diff/JSRF-V34-MANIFEST.md /mnt/data/jsrf_v34_package/JSRF-V34-MANIFEST.md
+--- /mnt/data/jsrf_v33_exact_for_diff/JSRF-V34-MANIFEST.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/jsrf_v34_package/JSRF-V34-MANIFEST.md	2026-09-08 22:47:11.286460489 +0000
+@@ -0,0 +1,54 @@
++# JSRF Native v34 manifest
++
++## Purpose
++
++v34 corrects the JSRF DirectSound GP DSP command mailbox used by the asynchronous acknowledgement model introduced in v33.
++
++Pinned xboxrecomp revision:
++
++`e3caa3718c80a241b31768852fa752aa6577b66c`
++
++## v33 Windows evidence
++
++v33 configured `RECOMP_APU_DSP_ACK=0x8037B810`, but the runtime never printed an asynchronous acknowledgement for that address. DirectSound still reached its late GP setup and then the main retail path stopped visibly advancing while timer/vblank and worker activity continued.
++
++The v33 log also records all allocations from the retail DirectSound descriptor-table allocator call site. Descriptor index 12 is the 0xC000-byte block at `0x803C0000`.
++
++## Root cause
++
++The previous address assumed that the GP command object used descriptor index 0 because that was the first matching 0x2000-byte contiguous allocation.
++
++Retail code proves otherwise:
++
++- `0x001A1712` constructs the command object with type `1`.
++- `sub_001A52AF` stores that type at object `+8`.
++- `sub_001A52F7` maps type `1` to descriptor offset `0xC0`, i.e. descriptor index 12 in the table at `0x001BA798`.
++- `sub_001A1769` loads the selected descriptor's allocation base, adds `0x810`, writes command `3`, and spins until that dword becomes zero.
++
++The correct mailbox is therefore:
++
++`0x803C0000 + 0x810 = 0x803C0810`
++
++## v34 change
++
++`scripts/Build-JSRF-XboxRecomp.ps1` now defaults `RECOMP_APU_DSP_ACK` to `0x803C0810` instead of `0x8037B810`.
++
++The asynchronous DSP worker itself is unchanged. No retail JSRF command, wait, gameplay, D3D, or allocator behavior is bypassed.
++
++## Regression coverage
++
++`tests/test_v34_dsound_gp_descriptor_mailbox.py` was written first and failed against v33 because the runner still targeted descriptor 0. It passes after the mailbox correction and also rejects the old `0x8037B810` address.
++
++The older v32 test now checks only that the generic acknowledgement mechanism and diagnostic environment override remain enabled; exact mailbox selection is owned by the v34 regression.
++
++## Next Windows evidence
++
++Run the v34 easy-test package. The decisive success marker for this correction is an APU log line reporting command `0x00000003` acknowledged at `0x803C0810`, followed by retail execution leaving the `0x001A18D0` wait and exposing the next blocker.
++
++## Fresh local verification
++
++- v34 mailbox regression: passed after failing against v33.
++- Full Python suite: **86 passed**.
++- Fresh native CMake configure/build: **passed**.
++- Native CTest suite: **20/20 passed**.
++- Windows runtime verification remains required; this manifest does not claim the GP wait is cleared until the user's v34 run shows the `0x803C0810` command acknowledgement.
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=default.xbe' '--exclude=dsound.bin' '--exclude=text.bin' /mnt/data/jsrf_v33_exact_for_diff/research/JSRF_V34_DSP_DESCRIPTOR_MAILBOX.md /mnt/data/jsrf_v34_package/research/JSRF_V34_DSP_DESCRIPTOR_MAILBOX.md
+--- /mnt/data/jsrf_v33_exact_for_diff/research/JSRF_V34_DSP_DESCRIPTOR_MAILBOX.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/jsrf_v34_package/research/JSRF_V34_DSP_DESCRIPTOR_MAILBOX.md	2026-09-08 22:45:37.733828596 +0000
+@@ -0,0 +1,89 @@
++# JSRF v34 — DirectSound GP descriptor mailbox correction
++
++## What the v33 Windows run proved
++
++v33 successfully enabled the generic asynchronous DSP acknowledgement worker, but the configured JSRF mailbox was still wrong.
++
++The runtime printed only the configuration line for `0x8037B810`; there was no later `acknowledged (async)` message. Execution again reached the late DirectSound GP setup, including `GPSMAXSGE = 0xCE`, then the main retail path stopped making visible progress while timer/vblank and worker kernel traffic continued.
++
++The old address came from the first allocation in DirectSound's 16-entry contiguous-memory descriptor table:
++
++- descriptor 0 allocation: `0x8037B000`
++- guessed mailbox: `0x8037B000 + 0x810 = 0x8037B810`
++
++That assumption was the mistake.
++
++## Retail selector proves descriptor 12
++
++The retail command object is created at `0x001A1712` with argument `1`:
++
++```asm
++001A1712  push 1
++001A1714  mov  ecx,eax
++001A1716  call 001A52AF
++```
++
++`sub_001A52AF` stores that argument at object `+8`:
++
++```asm
++001A52AF  mov eax,[esp+4]
++001A52B7  mov [ecx+8],eax
++```
++
++Then `sub_001A52F7` selects the descriptor from the 16-entry table:
++
++```asm
++001A5306  cmp   dword ptr [esi+8],1
++001A530B  setne al
++001A5312  lea   eax,[eax+eax+0xC]
++001A5316  shl   eax,4
++001A531B  lea   eax,[eax+0x001BA798]
++001A5321  mov   [esi+0x10],eax
++```
++
++For object type `1`, `setne al` yields zero, so the descriptor offset is:
++
++`(0 + 0 + 0xC) << 4 = 0xC0`
++
++Therefore the command object uses descriptor index 12, not descriptor index 0.
++
++## Windows allocation evidence
++
++The v33 runtime shows the allocations made from the same `0x001A0E55` call site in descriptor order. Entry 12 is the 0xC000-byte allocation:
++
++- index 0: `0x8037B000`, size `0x2000`
++- ...
++- index 11: `0x803BC000`, size `0x1000`
++- **index 12: `0x803C0000`, size `0xC000`**
++- index 13: `0x803CC000`, size `0x1060`
++- index 14: `0x803D0000`, size `0x13000`
++- index 15: `0x803E4000`, size `0x98`
++
++The retail command sender reaches the descriptor through object `+8 -> +0x10 -> [descriptor]`, then publishes command `3` at base `+0x810` and waits for the DSP to clear it:
++
++```asm
++001A1774  mov eax,[edi+8]
++001A1777  mov eax,[eax+0x10]
++001A177A  mov ebx,[eax]
++...
++001A18C6  add ebx,0x810
++001A18CE  mov [ebx],eax      ; eax = 3
++001A18D0  cmp dword ptr [ebx],0
++001A18D3  jne 001A18D0
++```
++
++So the actual GP command mailbox for this run is:
++
++`0x803C0000 + 0x810 = 0x803C0810`
++
++## v34 change
++
++The Windows runner now configures:
++
++`RECOMP_APU_DSP_ACK=0x803C0810`
++
++instead of `0x8037B810`.
++
++The v33 asynchronous worker is otherwise unchanged. This is intentionally one correction: point the already-existing DSP handshake model at the descriptor the retail object actually selects.
++
++No JSRF gameplay, D3D, audio command generation, allocator behavior, or retail wait loop is replaced.
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=default.xbe' '--exclude=dsound.bin' '--exclude=text.bin' /mnt/data/jsrf_v33_exact_for_diff/scripts/Build-JSRF-XboxRecomp.ps1 /mnt/data/jsrf_v34_package/scripts/Build-JSRF-XboxRecomp.ps1
+--- /mnt/data/jsrf_v33_exact_for_diff/scripts/Build-JSRF-XboxRecomp.ps1	2026-09-08 20:30:53.000000000 +0000
++++ /mnt/data/jsrf_v34_package/scripts/Build-JSRF-XboxRecomp.ps1	2026-09-08 22:44:51.700663271 +0000
+@@ -156,7 +156,7 @@
+     # dword at +0x810 and waits for the hardware DSP to clear it. xboxrecomp's
+     # passthrough DSP already models that completion when this address is set.
+     if ([string]::IsNullOrWhiteSpace($env:RECOMP_APU_DSP_ACK)) {
+-        $env:RECOMP_APU_DSP_ACK = "0x8037B810"
++        $env:RECOMP_APU_DSP_ACK = "0x803C0810"
+     }
+     if ([string]::IsNullOrWhiteSpace($env:RECOMP_WATCHDOG_SECS)) {
+         $env:RECOMP_WATCHDOG_SECS = "60"
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=default.xbe' '--exclude=dsound.bin' '--exclude=text.bin' /mnt/data/jsrf_v33_exact_for_diff/tests/test_v32_dsound_dsp_ack.py /mnt/data/jsrf_v34_package/tests/test_v32_dsound_dsp_ack.py
+--- /mnt/data/jsrf_v33_exact_for_diff/tests/test_v32_dsound_dsp_ack.py	2026-09-08 20:30:39.000000000 +0000
++++ /mnt/data/jsrf_v34_package/tests/test_v32_dsound_dsp_ack.py	2026-09-08 22:45:02.569350367 +0000
+@@ -3,9 +3,6 @@
+ ROOT = Path(__file__).resolve().parents[1]
+ BUILD = ROOT / "scripts" / "Build-JSRF-XboxRecomp.ps1"
+ 
+-JSRF_GP_COMMAND_BLOCK = 0x8037B000
+-JSRF_GP_DOORBELL = JSRF_GP_COMMAND_BLOCK + 0x810
+-
+ 
+ def test_windows_runner_enables_retail_jsrf_gp_dsp_doorbell_ack():
+     text = BUILD.read_text(encoding="utf-8")
+@@ -14,10 +11,8 @@
+         "the Windows runner must enable xboxrecomp's existing DSP doorbell "
+         "acknowledgement for JSRF"
+     )
+-    assert f'0x{JSRF_GP_DOORBELL:08X}' in text, (
+-        "the acknowledgement address must be the retail GP command block "
+-        "+0x810, not a guessed/placeholder address"
+-    )
+     assert 'IsNullOrWhiteSpace($env:RECOMP_APU_DSP_ACK)' in text, (
+         "an explicit caller override must remain possible for diagnostics"
+     )
++    # The exact retail mailbox address is pinned by the later v34 descriptor
++    # selection regression. v32 established the handshake mechanism itself.
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' '--exclude=default.xbe' '--exclude=dsound.bin' '--exclude=text.bin' /mnt/data/jsrf_v33_exact_for_diff/tests/test_v34_dsound_gp_descriptor_mailbox.py /mnt/data/jsrf_v34_package/tests/test_v34_dsound_gp_descriptor_mailbox.py
+--- /mnt/data/jsrf_v33_exact_for_diff/tests/test_v34_dsound_gp_descriptor_mailbox.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/jsrf_v34_package/tests/test_v34_dsound_gp_descriptor_mailbox.py	2026-09-08 22:44:40.540671682 +0000
+@@ -0,0 +1,23 @@
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++BUILD = ROOT / "scripts" / "Build-JSRF-XboxRecomp.ps1"
++
++# Retail DSOUND sub_001A52F7 selects descriptor index 12 when the object was
++# constructed with type 1 (sub_001A52AF stores that at object+8). The v33
++# Windows run shows descriptor 12's 0xC000-byte allocation at 0x803C0000.
++JSRF_GP_DESCRIPTOR12_BASE = 0x803C0000
++JSRF_GP_DOORBELL = JSRF_GP_DESCRIPTOR12_BASE + 0x810
++
++
++def test_windows_runner_targets_the_selected_gp_descriptor_mailbox():
++    text = BUILD.read_text(encoding="utf-8")
++
++    assert f'0x{JSRF_GP_DOORBELL:08X}' in text, (
++        "JSRF's GP command sender uses descriptor 12; the DSP acknowledgement "
++        "must poll descriptor12+0x810"
++    )
++    assert "0x8037B810" not in text, (
++        "0x8037B810 belongs to descriptor 0, which the retail command object "
++        "does not select"
++    )
