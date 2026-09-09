@@ -1,0 +1,358 @@
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/jsrf_v39/src/JSRF-V40-MANIFEST.md /mnt/data/jsrf_v40_work/JSRF-V40-MANIFEST.md
+--- /mnt/data/jsrf_v39/src/JSRF-V40-MANIFEST.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/jsrf_v40_work/JSRF-V40-MANIFEST.md	2026-09-09 03:51:02.532175823 +0000
+@@ -0,0 +1,75 @@
++# JSRF Native v40 manifest
++
++## Purpose
++
++v40 fixes the next stable post-SEGA static-recompilation CFG split exposed by
++the user's v39 Windows run. The visible SEGA frame no longer disappears, but
++retail execution corrupts its guest stack while entering the adjacent mark
++resource loader.
++
++Pinned xboxrecomp revision remains:
++
++`e3caa3718c80a241b31768852fa752aa6577b66c`
++
++## v39 Windows evidence
++
++- The genuine `Presented by SEGA` framebuffer remains visible.
++- Indirect-call #72899 exposes unresolved target `0x0002D1F8`.
++- The enclosing `sub_0002D080` path returns exactly `0x100` bytes below its
++  expected guest ESP.
++- The same `-0x100` displacement propagates into `0x00025310`, `0x00011070`,
++  `0x000123E0`, and `0x00013A80`.
++- Corrupted state then causes repeated null indirect calls from `0x0001194A`
++  and `0x00011FEA`.
++- NV2A `DMA_PUT == DMA_GET == 0x0007AD2C` after the corruption, explaining why
++  the last valid SEGA frame remains on screen.
++
++## Independent boundary evidence
++
++The public JSRF-Decompilation symbol table names:
++
++- `0x0002D080` — `readMarkDefault`
++- `0x0002DBE0` — `readMarkPressOrTex`
++
++Thus the observed `0x0002D1F8` destination lies inside `readMarkDefault`, and
++must not be treated as a standalone function.
++
++## v40 correction
++
++`JSRF_RETAIL_FUNCTION_BOUNDARIES` now also pins:
++
++`0x0002D080 .. 0x0002DBE0`
++
++The pinner removes generic internal starts in that interval. The adjacent v39
++boundary beginning at `0x0002DBE0` remains separate.
++
++Generated-code verification additionally requires `loc_0002D1F8` to be inside
++`sub_0002D080` before the Windows executable may launch.
++
++No retail gameplay, resource result, title-state decision, framebuffer content,
++GPU command, or kernel result is replaced or bypassed.
++
++## Regression coverage
++
++`tests/test_v40_mark_default_switch_boundary.py` was written first and failed
++4/4 against v39. After the v40 correction it passes 4/4 and covers:
++
++1. the exact retail function interval;
++2. removal of the observed internal false start;
++3. preservation of the adjacent v39 function;
++4. generated-code rejection if `0x0002D1F8` is not internal to
++   `sub_0002D080`.
++
++The v39 fixture was updated only where its synthetic `0x0002DB00` start is now
++known to lie inside the newly proven v40 function interval.
++
++## Fresh verification
++
++- Focused v39 + v40 regression: **8/8 passed**
++- Full Python suite: **108 passed**
++- Python compile check: **passed**
++- Fresh native CMake/Ninja configure/build: **passed**
++- Native CTest suite: **20/20 passed**
++
++Windows runtime confirmation is still required before claiming the SEGA-screen
++stall is cleared on the user's PC.
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/jsrf_v39/src/research/JSRF_V40_MARK_DEFAULT_SWITCH_BOUNDARY.md /mnt/data/jsrf_v40_work/research/JSRF_V40_MARK_DEFAULT_SWITCH_BOUNDARY.md
+--- /mnt/data/jsrf_v39/src/research/JSRF_V40_MARK_DEFAULT_SWITCH_BOUNDARY.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/jsrf_v40_work/research/JSRF_V40_MARK_DEFAULT_SWITCH_BOUNDARY.md	2026-09-09 03:50:38.571912718 +0000
+@@ -0,0 +1,56 @@
++# JSRF v40 — `readMarkDefault` CFG boundary
++
++## Windows evidence from v39
++
++The v39 Windows run keeps the genuine retail **Presented by SEGA** framebuffer
++visible, confirming that the v39 `0x0002DBE0 .. 0x0002E170` correction moved
++execution past the earlier post-logo corruption.
++
++The first new causal control-flow break in the v39 runtime log is:
++
++- `sub_00013F80` calls the retail frame path normally;
++- indirect-call #72899 surfaces target `0x0002D1F8` as unresolved;
++- the immediately enclosing `sub_0002D080` path returns with guest ESP exactly
++  `0x100` bytes below its expected value;
++- that same `-0x100` stack displacement propagates through `0x00025310`,
++  `0x00011070`, `0x000123E0`, and `0x00013A80`;
++- the corrupted frame then produces null indirect calls at return sites
++  `0x0001194A` and `0x00011FEA`;
++- while those null calls repeat, NV2A `DMA_PUT` and `DMA_GET` settle together at
++  `0x0007AD2C`, so the unchanged SEGA frame is downstream of the CPU/CFG break,
++  not evidence of a new GPU wait.
++
++The high-frequency kernel ordinals 129/161 observed late in the run are
++therefore downstream activity after the frame corruption, not the first cause.
++
++## Independent retail function boundary
++
++The public JSRF-Decompilation symbol table for the supported North American
++standalone executable identifies adjacent retail functions:
++
++- `readMarkDefault` — `0x0002D080`
++- `readMarkPressOrTex` — `0x0002DBE0`
++
++Therefore `0x0002D1F8` lies inside `readMarkDefault`; it is not a standalone
++retail function entry. Promoting it as a new independent callback would repeat
++the same class of CFG error fixed in v37/v39.
++
++## v40 correction
++
++v40 adds the measured interval
++
++`0x0002D080 .. 0x0002DBE0`
++
++to `JSRF_RETAIL_FUNCTION_BOUNDARIES`.
++
++The existing boundary pinner removes every generic false start strictly inside
++that range, including the runtime-observed `0x0002D1F8`, while preserving the
++adjacent v39 `0x0002DBE0` function as its own entry.
++
++Generated-code verification now additionally requires `0x0002D1F8` to exist as
++an internal label inside generated `sub_0002D080` before a Windows runtime is
++launched. This catches a future regression where xboxrecomp splits the same
++computed destination out again.
++
++No game return value, resource-read result, title-state decision, framebuffer
++content, GPU command, or kernel result is forced.
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/jsrf_v39/src/scripts/jsrf_xboxrecomp.py /mnt/data/jsrf_v40_work/scripts/jsrf_xboxrecomp.py
+--- /mnt/data/jsrf_v39/src/scripts/jsrf_xboxrecomp.py	2026-09-09 02:59:39.000000000 +0000
++++ /mnt/data/jsrf_v40_work/scripts/jsrf_xboxrecomp.py	2026-09-09 03:48:52.552784401 +0000
+@@ -54,6 +54,15 @@
+ 
+ 
+ JSRF_RETAIL_FUNCTION_BOUNDARIES = (
++    # v40: v39 keeps the Presented by SEGA frame alive but the next stable
++    # post-logo break moves earlier in the adjacent mark-resource loader. The
++    # runtime surfaces 0x2D1F8 as an unresolved indirect destination and
++    # sub_0002D080 then returns with guest ESP exactly 0x100 bytes low. The
++    # independently maintained JSRF symbol table identifies 0x2D080 as
++    # readMarkDefault and 0x2DBE0 as the next real function, readMarkPressOrTex.
++    # Keep the entire retail readMarkDefault CFG intact so internal computed
++    # destinations such as 0x2D1F8 cannot be emitted as standalone functions.
++    {"start": 0x0002D080, "end": 0x0002DBE0},
+     # v39: v38 finally renders the real Presented by SEGA frame, then the first
+     # stable post-logo ABI break is sub_0002DBE0 losing exactly 0x10C bytes of
+     # guest stack. Retail 0x2DBE0 allocates 0x100 bytes, saves EBX/EBP/ESI/EDI,
+@@ -1582,6 +1591,7 @@
+     gen_dir: str | Path, *, require_v35_low_text: bool = False,
+     require_v36_vtable: bool = False, require_v37_switch: bool = False,
+     require_v39_title_switch: bool = False,
++    require_v40_mark_default: bool = False,
+ ) -> None:
+     """Fail the build if codegen loses a retail-proven JSRF stack contract."""
+     import re
+@@ -1731,6 +1741,25 @@
+             if not found:
+                 raise RuntimeError(f"Generated {name} was not found in recomp output")
+ 
++    if require_v40_mark_default:
++        signature = "void sub_0002D080(void)"
++        found = False
++        for text in sources:
++            start = text.find(signature)
++            if start < 0:
++                continue
++            found = True
++            next_function = text.find("\n/**", start + len(signature))
++            body = text[start:] if next_function < 0 else text[start:next_function]
++            if "loc_0002D1F8:" not in body:
++                raise RuntimeError(
++                    "Generated sub_0002D080 does not contain internal retail "
++                    "destination 0x0002D1F8"
++                )
++            break
++        if not found:
++            raise RuntimeError("Generated sub_0002D080 was not found in recomp output")
++
+ def _u32(data: bytes, offset: int) -> int:
+     if offset < 0 or offset + 4 > len(data):
+         raise ValueError(f"XBE offset 0x{offset:X} is outside the file")
+@@ -2041,6 +2070,7 @@
+                 require_v36_vtable=True,
+                 require_v37_switch=True,
+                 require_v39_title_switch=True,
++                require_v40_mark_default=True,
+             )
+ 
+ 
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/jsrf_v39/src/tests/test_v39_title_state_switch_boundary.py /mnt/data/jsrf_v40_work/tests/test_v39_title_state_switch_boundary.py
+--- /mnt/data/jsrf_v39/src/tests/test_v39_title_state_switch_boundary.py	2026-09-09 02:58:00.000000000 +0000
++++ /mnt/data/jsrf_v40_work/tests/test_v39_title_state_switch_boundary.py	2026-09-09 03:49:21.558071027 +0000
+@@ -77,7 +77,9 @@
+     assert by_start[0x0002DBE0]["size"] == 0x590
+     for false_start in false_starts:
+         assert false_start not in by_start
+-    assert int(by_start[0x0002DB00]["end"], 16) == 0x0002DBE0
++    # v40 proves 0x2DB00 lies inside the adjacent 0x2D080..0x2DBE0 retail
++    # function, so the combined pinner correctly removes this synthetic start.
++    assert 0x0002DB00 not in by_start
+     assert by_start[0x0002DBE0]["jsrf_evidence_at"] == "0x001EC154"
+ 
+ 
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/jsrf_v39/src/tests/test_v40_mark_default_switch_boundary.py /mnt/data/jsrf_v40_work/tests/test_v40_mark_default_switch_boundary.py
+--- /mnt/data/jsrf_v39/src/tests/test_v40_mark_default_switch_boundary.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/jsrf_v40_work/tests/test_v40_mark_default_switch_boundary.py	2026-09-09 03:48:29.385553540 +0000
+@@ -0,0 +1,140 @@
++import json
++from pathlib import Path
++
++import pytest
++
++
++def test_v40_pins_read_mark_default_whole_retail_function():
++    from scripts.jsrf_xboxrecomp import JSRF_RETAIL_FUNCTION_BOUNDARIES
++
++    bounds = {item["start"]: item for item in JSRF_RETAIL_FUNCTION_BOUNDARIES}
++    method = bounds[0x0002D080]
++
++    # v39 Windows runtime: generic CFG recovery exposes 0x2D1F8 as an
++    # unresolved indirect destination while executing the retail routine that
++    # starts at 0x2D080. The owning call then returns exactly 0x100 bytes below
++    # its expected guest ESP. Independent JSRF symbol data identifies 0x2D080
++    # as readMarkDefault and 0x2DBE0 as the next real function start.
++    assert method["end"] == 0x0002DBE0
++
++
++def test_v40_boundary_pinner_absorbs_2d1f8_internal_case(tmp_path):
++    from scripts.jsrf_xboxrecomp import pin_jsrf_function_boundaries
++
++    functions = [
++        {
++            "start": "0x0002D000",
++            "end": "0x0002D1F8",
++            "size": 0x1F8,
++            "name": "sub_0002D000",
++            "section": ".text",
++            "called_by": [],
++        },
++        {
++            "start": "0x0002D080",
++            "end": "0x0002D1F8",
++            "size": 0x178,
++            "name": "sub_0002D080",
++            "section": ".text",
++            "called_by": [],
++        },
++        {
++            "start": "0x0002D1F8",
++            "end": "0x0002D260",
++            "size": 0x68,
++            "name": "sub_0002D1F8",
++            "section": ".text",
++            "called_by": [],
++        },
++        {
++            "start": "0x0002D260",
++            "end": "0x0002DBE0",
++            "size": 0x980,
++            "name": "sub_0002D260",
++            "section": ".text",
++            "called_by": [],
++        },
++        {
++            "start": "0x0002DBE0",
++            "end": "0x0002E170",
++            "size": 0x590,
++            "name": "sub_0002DBE0",
++            "section": ".text",
++            "called_by": [],
++        },
++    ]
++    path = tmp_path / "functions.json"
++    path.write_text(json.dumps(functions), encoding="utf-8")
++
++    pin_jsrf_function_boundaries(path)
++    pinned = json.loads(path.read_text(encoding="utf-8"))
++    by_start = {int(item["start"], 16): item for item in pinned}
++
++    assert int(by_start[0x0002D080]["end"], 16) == 0x0002DBE0
++    assert by_start[0x0002D080]["size"] == 0xB60
++    assert 0x0002D1F8 not in by_start
++    assert 0x0002D260 not in by_start
++    assert int(by_start[0x0002D000]["end"], 16) == 0x0002D080
++    # The adjacent v39 correction must remain a separate function.
++    assert int(by_start[0x0002DBE0]["end"], 16) == 0x0002E170
++
++
++def _write_contract_fixture(path: Path, *, include_internal_case: bool) -> None:
++    internal_case = "loc_0002D1F8:;\n" if include_internal_case else ""
++    path.write_text(
++        "void sub_00160080(void) {\n"
++        "esp += 16; return; /* ret 12 */\n"
++        "esp += 16; return; /* ret 12 */\n"
++        "esp += 16; return; /* ret 12 */\n"
++        "}\n/** next */\n"
++        "void sub_00178A00(void) { esp += 28; return; /* ret 24 */ }\n"
++        "/** next */\n"
++        "void sub_00011070(void) { esp += 4; return; /* ret */ }\n"
++        "/** next */\n"
++        "void sub_00025040(void) {\n"
++        + "\n".join(["esp += 4; return; /* ret */"] * 9)
++        + "\n}\n/** next */\n"
++        "void sub_0007E180(void) {\n"
++        + "\n".join(["esp += 4; return; /* ret */"] * 3)
++        + "\n}\n/** next */\n"
++        "void sub_000304F0(void) {\n"
++        + "\n".join(["esp += 4; return; /* ret */"] * 2)
++        + "\n}\n/** next */\n"
++        "void sub_0002D080(void) {\n"
++        + internal_case
++        + "esp += 4; return; /* ret */\n"
++        "}\n/** next */\n"
++        "void sub_0002DBE0(void) {\n"
++        + "\n".join(["esp += 4; return; /* ret */"] * 8)
++        + "\n}\n/** next */\n",
++        encoding="utf-8",
++    )
++
++
++def test_v40_generated_contract_rejects_missing_internal_2d1f8_case(tmp_path):
++    from scripts.jsrf_xboxrecomp import verify_jsrf_generated_contracts
++
++    _write_contract_fixture(tmp_path / "recomp_0000.c", include_internal_case=False)
++    with pytest.raises(RuntimeError, match="0002D1F8"):
++        verify_jsrf_generated_contracts(
++            tmp_path,
++            require_v35_low_text=True,
++            require_v36_vtable=True,
++            require_v37_switch=True,
++            require_v39_title_switch=True,
++            require_v40_mark_default=True,
++        )
++
++
++def test_v40_generated_contract_accepts_2d1f8_inside_read_mark_default(tmp_path):
++    from scripts.jsrf_xboxrecomp import verify_jsrf_generated_contracts
++
++    _write_contract_fixture(tmp_path / "recomp_0000.c", include_internal_case=True)
++    verify_jsrf_generated_contracts(
++        tmp_path,
++        require_v35_low_text=True,
++        require_v36_vtable=True,
++        require_v37_switch=True,
++        require_v39_title_switch=True,
++        require_v40_mark_default=True,
++    )
