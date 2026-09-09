@@ -1,0 +1,184 @@
+diff -ruN '--exclude=build_verify' '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/jsrf_v37_inspect/JSRF-V38-MANIFEST.md /mnt/data/jsrf_v38_work/JSRF-V38-MANIFEST.md
+--- /mnt/data/jsrf_v37_inspect/JSRF-V38-MANIFEST.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/jsrf_v38_work/JSRF-V38-MANIFEST.md	2026-09-09 02:27:01.756651733 +0000
+@@ -0,0 +1,53 @@
++# JSRF Native v38 manifest
++
++## Purpose
++
++v38 is the first **visual bring-up** package. The user's v37 Windows run confirms the v37 switch-frame correction: the old `0x000304F0` `0x104`-byte stack leak is gone, no crash/stack guard is emitted, retail `AvSetDisplayMode` is reached, media continues loading, and the main loop remains alive past 822,000 kernel calls.
++
++Pinned xboxrecomp revision remains:
++
++`e3caa3718c80a241b31768852fa752aa6577b66c`
++
++## v37 Windows evidence
++
++- `AvSetDisplayMode` is called with mode `0x0801010D`, format `0x11`, pitch 1280 and framebuffer `0x001B2000`.
++- The prior `0x000304F0` ABI/stack violation is absent.
++- No `[CRASH]` or `[STACKGUARD]` appears in the supplied runtime log.
++- JSRF continues loading retail title, mission, misc and sound data after display setup.
++- The main loop remains at a stable guest ESP and the runtime reaches at least 822,246 kernel calls.
++
++## Root cause of the missing window
++
++xboxrecomp already contains two real guest-side visual paths:
++
++1. `RECOMP_FB_WINDOW` scans the framebuffer selected by retail `AvSetDisplayMode` into a Win32 window.
++2. `RECOMP_PB_EXEC` consumes the title's NV2A pushbuffer and writes supported clears/2D geometry/textures into guest framebuffer memory.
++
++Both paths are deliberately opt-in upstream. v37 enabled neither, so JSRF could reach display setup and continue running without any host window or executed pushbuffer pixels.
++
++## v38 correction
++
++The easy Windows run now defaults these existing xboxrecomp paths on:
++
++- `RECOMP_FB_WINDOW=1`
++- `RECOMP_PB_EXEC=1`
++- `RECOMP_PB_SCAN=1`
++- `RECOMP_PB_EXEC_VERBOSE=1`
++- `RECOMP_PB_UNHANDLED_ALL=1`
++
++`RECOMP_RASTER_TEST` is intentionally **not** enabled. Any pixels shown must come from the retail JSRF framebuffer/pushbuffer, not from a synthetic test triangle.
++
++The scan/verbose flags are diagnostic only. If the first window is black or incomplete, the runtime log will inventory the real NV2A methods JSRF submitted so the next graphics gap can be fixed from evidence.
++
++## Regression coverage
++
++`tests/test_v38_visual_output_defaults.py` was written first and failed against v37 because the visual paths were not enabled. After the v38 change it passes.
++
++## Fresh local verification
++
++- Focused v38 regression: **1 passed**
++- Full Python suite: **100 passed**
++- Python compile check: **passed**
++- Fresh native CMake configure/build: **passed**
++- Native CTest suite: **20/20 passed**
++- Windows runtime verification is still required; this manifest does not claim that the first visible JSRF frame is correct until the user's v38 run confirms it.
+diff -ruN '--exclude=build_verify' '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/jsrf_v37_inspect/README.md /mnt/data/jsrf_v38_work/README.md
+--- /mnt/data/jsrf_v37_inspect/README.md	2026-09-09 01:34:26.000000000 +0000
++++ /mnt/data/jsrf_v38_work/README.md	2026-09-09 02:27:01.788652247 +0000
+@@ -28,11 +28,12 @@
+ 
+ ## Current native bring-up correction
+ 
+-v37 pins the complete retail switch routine at `0x000304F0`. The v36 Windows
+-run reached `AvSetDisplayMode`, then generic CFG recovery split its internal
+-jump-table case `0x0003050F` away from the routine and skipped the shared
+-`add esp,0x104` epilogue. v37 keeps the switch CFG indivisible and validates
+-both retail return exits before the executable is allowed to run.
++v38 enables xboxrecomp's real guest framebuffer window and NV2A pushbuffer
++executor for the easy Windows test. The v37 Windows run confirmed the previous
++`0x000304F0` stack leak is gone, reached retail `AvSetDisplayMode`, continued
++loading game media, and stayed alive in the main loop. The missing host window
++was now a configuration gap: both upstream visual paths were still opt-in and
++disabled. v38 turns them on without enabling the synthetic raster test.
+ 
+ ## Current milestone: verified asset decoding
+ 
+@@ -89,7 +90,8 @@
+ 
+ ## Current native bring-up diagnostic
+ 
+-The v36 Windows run now reaches the retail display-mode path. v37 addresses the
+-next measured corruption: the `0x000304F0` switch routine loses exactly its
+-`0x104`-byte local frame when internal case `0x0003050F` is misclassified as a
+-separate unresolved target.
++The v37 Windows run reaches retail display setup and then remains alive in the
++game loop with a stable stack. v38 therefore enables the existing guest
++framebuffer scanout plus pushbuffer executor and their live NV2A diagnostics.
++If the first real window is black or incomplete, the next log will show which
++retail GPU methods are still missing rather than requiring a guess.
+diff -ruN '--exclude=build_verify' '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/jsrf_v37_inspect/research/JSRF_V38_VISUAL_BRINGUP.md /mnt/data/jsrf_v38_work/research/JSRF_V38_VISUAL_BRINGUP.md
+--- /mnt/data/jsrf_v37_inspect/research/JSRF_V38_VISUAL_BRINGUP.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/jsrf_v38_work/research/JSRF_V38_VISUAL_BRINGUP.md	2026-09-09 02:26:41.083574823 +0000
+@@ -0,0 +1,28 @@
++# JSRF v38 — first real framebuffer/pushbuffer visual bring-up
++
++## What v37 proved
++
++The v37 Windows run removes the previous `0x000304F0` switch-frame stack leak. The main thread now keeps a stable ESP through `sub_00013F80`, retail D3D reaches `AvSetDisplayMode`, and the title continues loading real game media. There is no crash or stack guard in the supplied run.
++
++## Why there was still no window
++
++The pinned xboxrecomp runtime already has a Win32 framebuffer scanout (`RECOMP_FB_WINDOW`) and a partial NV2A pushbuffer executor (`RECOMP_PB_EXEC`). Both are opt-in by design. The v37 easy-test environment enabled vblank and JSRF's measured APU handshake, but never enabled either visual path.
++
++That means the title can successfully select a display framebuffer and continue its main loop while the host does not scan that framebuffer out and does not execute the NV2A commands that would populate it.
++
++## v38 experiment
++
++Enable only the existing real guest visual paths in the easy Windows runtime environment:
++
++- framebuffer window
++- pushbuffer executor
++- pushbuffer survey/verbose diagnostics
++- complete unhandled-method report
++
++Do **not** enable `RECOMP_RASTER_TEST`, because a synthetic triangle would answer the wrong question. The first visual must be produced by JSRF's own retail command stream.
++
++## Expected outcome
++
++Best case: a Win32 framebuffer window opens after JSRF calls `AvSetDisplayMode`, and supported JSRF clears/UI/texture draws become visible.
++
++If the window is black or incomplete, the new `[GPU]` / `[PB]` diagnostics identify the next unimplemented NV2A method or surface-format path without another blind graphics guess.
+diff -ruN '--exclude=build_verify' '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/jsrf_v37_inspect/scripts/Build-JSRF-XboxRecomp.ps1 /mnt/data/jsrf_v38_work/scripts/Build-JSRF-XboxRecomp.ps1
+--- /mnt/data/jsrf_v37_inspect/scripts/Build-JSRF-XboxRecomp.ps1	2026-09-08 22:44:50.000000000 +0000
++++ /mnt/data/jsrf_v38_work/scripts/Build-JSRF-XboxRecomp.ps1	2026-09-09 02:25:12.475891545 +0000
+@@ -151,6 +151,28 @@
+     if ([string]::IsNullOrWhiteSpace($env:RECOMP_VBLANK)) {
+         $env:RECOMP_VBLANK = "1"
+     }
++
++    # v37 reaches the retail AvSetDisplayMode call and remains in JSRF's main
++    # loop. xboxrecomp deliberately keeps its guest framebuffer scanout and
++    # NV2A pushbuffer executor opt-in; without both, the title can run while no
++    # host window ever displays the pixels it asked the GPU to draw. Enable the
++    # real guest paths for the visual bring-up. RECOMP_RASTER_TEST stays OFF so
++    # anything visible comes only from JSRF's retail command stream/framebuffer.
++    if ([string]::IsNullOrWhiteSpace($env:RECOMP_FB_WINDOW)) {
++        $env:RECOMP_FB_WINDOW = "1"
++    }
++    if ([string]::IsNullOrWhiteSpace($env:RECOMP_PB_EXEC)) {
++        $env:RECOMP_PB_EXEC = "1"
++    }
++    if ([string]::IsNullOrWhiteSpace($env:RECOMP_PB_SCAN)) {
++        $env:RECOMP_PB_SCAN = "1"
++    }
++    if ([string]::IsNullOrWhiteSpace($env:RECOMP_PB_EXEC_VERBOSE)) {
++        $env:RECOMP_PB_EXEC_VERBOSE = "1"
++    }
++    if ([string]::IsNullOrWhiteSpace($env:RECOMP_PB_UNHANDLED_ALL)) {
++        $env:RECOMP_PB_UNHANDLED_ALL = "1"
++    }
+     # Retail JSRF DirectSound GP command block. sub_001A5FEE allocates the
+     # first GP block at 0x8037B000; sub_001A1769 writes its command/status
+     # dword at +0x810 and waits for the hardware DSP to clear it. xboxrecomp's
+diff -ruN '--exclude=build_verify' '--exclude=__pycache__' '--exclude=.pytest_cache' /mnt/data/jsrf_v37_inspect/tests/test_v38_visual_output_defaults.py /mnt/data/jsrf_v38_work/tests/test_v38_visual_output_defaults.py
+--- /mnt/data/jsrf_v37_inspect/tests/test_v38_visual_output_defaults.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/jsrf_v38_work/tests/test_v38_visual_output_defaults.py	2026-09-09 02:24:47.761400121 +0000
+@@ -0,0 +1,25 @@
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def test_v38_enables_real_guest_framebuffer_and_pushbuffer_execution_by_default():
++    build = (ROOT / "scripts" / "Build-JSRF-XboxRecomp.ps1").read_text(encoding="utf-8")
++
++    # v37 reaches retail AvSetDisplayMode and then stays alive in the game loop,
++    # but xboxrecomp's real guest framebuffer window and pushbuffer executor are
++    # opt-in environment features. The easy test must turn them on so the user's
++    # next run can show pixels produced from JSRF's own NV2A command stream.
++    assert '$env:RECOMP_FB_WINDOW = "1"' in build
++    assert '$env:RECOMP_PB_EXEC = "1"' in build
++
++    # Keep the survey/verbose diagnostics on for the first visual bring-up. If
++    # the window is black, the log must say what JSRF actually submitted rather
++    # than forcing us to guess which NV2A method is missing.
++    assert '$env:RECOMP_PB_SCAN = "1"' in build
++    assert '$env:RECOMP_PB_EXEC_VERBOSE = "1"' in build
++    assert '$env:RECOMP_PB_UNHANDLED_ALL = "1"' in build
++
++    # Never enable the synthetic raster test in the user's package: any pixels
++    # shown must come from the retail title's own framebuffer/pushbuffer.
++    assert '$env:RECOMP_RASTER_TEST' not in build
