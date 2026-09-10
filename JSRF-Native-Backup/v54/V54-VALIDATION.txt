@@ -1,0 +1,29 @@
+JSRF Native v54 validation
+
+Evidence-driven scope:
+- v53 Windows logs reach title state 12 and keep the NV2A path active.
+- The v53 GPU inventory records thousands of alpha/blend state writes and
+  2,424 FLIP_INCREMENT_WRITE / FLIP_STALL operations.
+- v54 adds only the matching fixed-function alpha/blend behavior, the five
+  upstream-compatible flip-state methods, corrected survey labels, and bounded
+  state diagnostics. It does not synthesize title/menu state or texture data.
+- Texture samples remain unmodified by guessed register-combiner behavior.
+
+TDD / local verification:
+- v54 targeted regression was observed failing before the missing behavior was
+  implemented; the final targeted suite passes: 6 passed.
+- A follow-up regression was observed failing while speculative diffuse
+  modulation was present; it passes after removing that unsupported operation.
+- Full Python regression suite: 187 passed.
+- `python -m py_compile scripts/jsrf_xboxrecomp.py`: passed.
+- Fresh CMake/Ninja configure and native build: passed.
+- Native CTest suite: 20/20 passed.
+- Root one-click launcher `START JSRF TEST.bat`: present.
+- Source tree after cleanup contains no retail `default.xbe`, Media/game/
+  isoextract payload, Python bytecode, pytest cache, or local verification build.
+
+Windows runtime status:
+- NOT YET VERIFIED. The post-logo white/blocky visual defect is not claimed
+  fixed until the v54 Windows easy-test is run against the user's retail files.
+- If the output is still wrong, `[GPUBLEND]` and `[GPUFLIP]` lines in the new
+  logs provide the next exact graphics state to analyze.
