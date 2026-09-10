@@ -1,0 +1,49 @@
+--- jsrf_v59_src/scripts/jsrf_xboxrecomp.py	2026-09-10 20:43:10.667232729 +0000
++++ jsrf_v59_hotfix1/scripts/jsrf_xboxrecomp.py	2026-09-10 21:20:38.539458069 +0000
+@@ -2998,6 +2998,22 @@
+             if count:
+                 remaining.discard(va)
+                 changed = True
++                continue
++
++            # xboxrecomp does not guarantee that a translated function start is
++            # also emitted as a loc_XXXXXXXX label.  In the retail JSRF build,
++            # 0x0013FAD0 is a real function entry but its redundant entry label
++            # is omitted, so anchor the probe directly after the function's
++            # opening brace when the label form is absent.
++            func_pattern = re.compile(
++                rf"(?m)^(?P<sig>void\s+sub_{va:08X}\(void\)\s*\n\{{)$"
++            )
++            text, count = func_pattern.subn(
++                rf"\g<sig>\n    {call}", text, count=1
++            )
++            if count:
++                remaining.discard(va)
++                changed = True
+         if changed:
+             texts[source] = text
+ 
+--- jsrf_v59_src/tests/test_v59_adxt_ring_flow_diagnostics.py	2026-09-10 20:51:20.909818792 +0000
++++ jsrf_v59_hotfix1/tests/test_v59_adxt_ring_flow_diagnostics.py	2026-09-10 21:20:16.762147331 +0000
+@@ -53,6 +53,21 @@
+     assert src.read_text(encoding="utf-8") == once
+ 
+ 
++
++def test_v59_instruments_function_entry_when_entry_label_is_not_emitted(tmp_path):
++    from scripts.jsrf_xboxrecomp import instrument_jsrf_adxt_ring_probe
++
++    src = tmp_path / "recomp_0000.c"
++    text = _generated_ring_functions().replace("loc_0013FAD0: ;\n", "")
++    src.write_text(text, encoding="utf-8")
++
++    instrument_jsrf_adxt_ring_probe(tmp_path)
++    once = src.read_text(encoding="utf-8")
++
++    assert "void sub_0013FAD0(void)\n{\n    jsrf_adxt_ring_probe(0x0013FAD0u);" in once
++    instrument_jsrf_adxt_ring_probe(tmp_path)
++    assert src.read_text(encoding="utf-8") == once
++
+ def test_v59_ring_probe_is_read_only_and_reports_ring_and_pair_state():
+     manual = (ROOT / "recomp" / "src" / "recomp_manual.c").read_text(encoding="utf-8")
+     start = manual.index("void jsrf_adxt_ring_probe(uint32_t va)")
