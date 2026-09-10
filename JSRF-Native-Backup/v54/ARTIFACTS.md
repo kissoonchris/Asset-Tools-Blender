@@ -1,39 +1,41 @@
 # JSRF Native v54 artifacts
 
-## Easy-test package
+## Corrected easy-test package
 
 - File: `JSRF-Native-Easy-Test-Checkpoint-08-FIXED-v54.zip`
-- SHA-256: `aa8f4a1a138e6d23ef4dbf1d8abc2c5e0fd82a68d00e0249c560c4bd0d6a1dcd`
+- SHA-256: `ef33770bc444c2742a28654ca9810fc89b869c20fd26487736861d371ca916c7`
+- This supersedes the first v54 ZIP, whose Windows installer stopped before generation because its patch anchor expected a comment-free `NV097_SET_VERTEX_DATA_ARRAY_OFFSET` define.
 
-## Source checkpoint
+## Corrected source checkpoint
 
-- File: `JSRF-Native-Source-Checkpoint-08-HOTFIX53.zip`
-- SHA-256: `aa8f4a1a138e6d23ef4dbf1d8abc2c5e0fd82a68d00e0249c560c4bd0d6a1dcd`
-- Byte-identical to the easy-test package.
+- File: `JSRF-Native-Source-Checkpoint-08-FIXED-v54.zip`
+- SHA-256: `ef33770bc444c2742a28654ca9810fc89b869c20fd26487736861d371ca916c7`
+- Byte-identical to the corrected easy-test package.
 
 ## v53 -> v54 patch
 
-- File: `JSRF-V53-to-V54.patch`
-- SHA-256: `e0d72960da65ca318985de527e600f200ce71fb7b768e5d19e570a5b6f210e92`
-- GitHub transport: `V53-to-V54.patch.gz.b64`
-- Transport SHA-256: `2489049adfeec9ab29087e1933b6e162fb525715242a813ac641b092d9ddc686`
-- Patch was verified by applying it to the latest packaged v53 source and comparing the result byte-for-byte with the cleaned v54 source tree.
+- Corrected local patch file: `JSRF-V53-to-V54.patch`
+- Corrected patch SHA-256: `f64a982765225b01cb080b6a8d270ed5bf9496730de0cc34ce5c78b7d98e89e7`
+- Existing GitHub transport `V53-to-V54.patch.gz.b64` records the initial v54 change set.
+- Apply `V54-WINDOWS-PATCH-ANCHOR-HOTFIX.patch` after that transport to recover the corrected Windows patch anchor.
+- Hotfix SHA-256: `b9b2d23e7652ea8f85fcf66db3592432c332c9c9191a26d4fa19755636ac5faf`
 
 ## Documentation
 
-- `MANIFEST.md`: `89eeb442e075b3f91a533eec53c0876c010b786967933ce804a26102764134b4`
-- `V54-VALIDATION.txt`: `a6570fe5e7c6d4ab9033661f000b26387ca25e12efe10c0b8e44b05c414b6920`
-- `NV2A_ALPHA_BLEND_COMPOSITING.md`: `bd2ba25fd23747b4b710982a366a95b6bd5b663f18b5d68391f4133d319d7800`
+- Corrected `MANIFEST.md`: `2c769971889b848b2166ff8e35b351647829b1b4cd50e5e97990d5da3a9e449f`
+- Corrected `V54-VALIDATION.txt`: `b04f180a5832473e2c7b0e6ee8e2212c357797563bb83ab98c1e9c2f313e8a48`
+- `NV2A_ALPHA_BLEND_COMPOSITING.md` remains unchanged.
 
 ## Final package verification
 
-The actual easy-test ZIP was integrity-checked, extracted to a clean directory, and verified from that extracted copy:
+The corrected easy-test ZIP was integrity-checked, extracted to a clean directory, and verified from that extracted copy:
 
 - root `START JSRF TEST.bat`: present;
-- Python suite: 187 passed;
+- Python suite: 188 passed;
 - Python compile check: passed;
-- fresh CMake/Ninja configure/build: passed;
+- fresh CMake configure/build: passed;
 - native CTest: 20/20 passed;
+- regression for the exact pinned xboxrecomp inline-comment constant layout: passed;
 - no retail `default.xbe` payload or local pytest/build cache is packaged.
 
-Windows runtime behavior remains unverified until the v54 easy-test is run with the user's retail JSRF files.
+Windows runtime behavior remains unverified until the corrected v54 easy-test is run with the user's retail JSRF files.
