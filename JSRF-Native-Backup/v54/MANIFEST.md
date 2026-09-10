@@ -61,6 +61,10 @@ upstream behavior rather than creating JSRF-specific flip rules.
    alpha/blend registers around `0x033C..0x0350`.
 8. Retain v53's permanent resource callbacks, all earlier ABI/runtime fixes,
    and the v51 packed-RGB565 clear-value correction.
+9. Fix the v54 installer patch anchor so it matches the exact pinned xboxrecomp
+   source downloaded on Windows. The upstream vertex-array define includes an
+   inline comment; v54 now preserves that line instead of requiring a
+   comment-free spelling.
 
 No title state, texture content, framebuffer address, blend parameter, or menu
 transition is fabricated. Unsupported/unknown alpha state passes rather than
@@ -84,8 +88,9 @@ banner must say `JSRF Native v54`.
 ## Local verification
 
 The v54 regression covers alpha/blend patching, upstream-compatible flip state,
-corrected scanner names, patch idempotence, and executable alpha/blend/R5G6B5
-math. Full source/package verification is recorded in `V54-VALIDATION.txt`.
+corrected scanner names, patch idempotence, the exact pinned executor constant
+layout used by the Windows download, and executable alpha/blend/R5G6B5 math.
+Full source/package verification is recorded in `V54-VALIDATION.txt`.
 
 Windows runtime behavior is intentionally not claimed here. The supplied v53
 run establishes the input evidence; the v54 Windows run is the validation of the
