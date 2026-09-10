@@ -11,19 +11,30 @@ Evidence-driven scope:
 
 TDD / local verification:
 - v54 targeted regression was observed failing before the missing behavior was
-  implemented; the final targeted suite passes: 6 passed.
+  implemented; the final targeted suite passes: 7 passed.
 - A follow-up regression was observed failing while speculative diffuse
   modulation was present; it passes after removing that unsupported operation.
-- Full Python regression suite: 187 passed.
+- A packaging regression reproduced the exact Windows failure where the pinned
+  executor's `NV097_SET_VERTEX_DATA_ARRAY_OFFSET` define carries its upstream
+  inline comment. The old patch required a comment-free line and raised
+  `Pinned xboxrecomp NV097 constant block no longer matches`; the corrected
+  patch now anchors only on the three preceding stable defines and preserves
+  the pinned line verbatim. This regression was observed failing first and now
+  passes.
+- Full Python regression suite: 188 passed.
 - `python -m py_compile scripts/jsrf_xboxrecomp.py`: passed.
-- Fresh CMake/Ninja configure and native build: passed.
+- Fresh CMake configure and native build: passed.
 - Native CTest suite: 20/20 passed.
+- Packaged ZIP integrity: passed.
+- Packaged-copy Python regression suite: 188 passed.
+- Packaged-copy native CTest suite: 20/20 passed.
 - Root one-click launcher `START JSRF TEST.bat`: present.
-- Source tree after cleanup contains no retail `default.xbe`, Media/game/
-  isoextract payload, Python bytecode, pytest cache, or local verification build.
+- Source package excludes retail `default.xbe`, Media/game/isoextract payload,
+  Python bytecode, pytest cache, and local verification build directories.
 
 Windows runtime status:
 - NOT YET VERIFIED. The post-logo white/blocky visual defect is not claimed
-  fixed until the v54 Windows easy-test is run against the user's retail files.
+  fixed until the corrected v54 Windows easy-test is run against the user's
+  retail files.
 - If the output is still wrong, `[GPUBLEND]` and `[GPUFLIP]` lines in the new
   logs provide the next exact graphics state to analyze.
