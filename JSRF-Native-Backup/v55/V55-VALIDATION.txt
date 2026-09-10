@@ -1,0 +1,33 @@
+JSRF Native v55 validation
+==========================
+
+Purpose
+-------
+Read-only diagnostic for the retail dirty-disc helper at 0x0006F730. The v55 change preserves v54 graphics behavior and does not bypass, clear, or alter the retail error state.
+
+Retail static evidence
+----------------------
+- The English dirty-disc string is selected by helper 0x0006F730.
+- Full retail .text direct-transfer scan found exactly:
+    0002537E  JMP  0006F730
+    000255AD  CALL 0006F730  -> return 000255B2
+    000664C3  CALL 0006F730  -> return 000664C8
+    00116EA8  CALL 0006F730  -> return 00116EAD
+- 0x00116EA8 checks signed word stream status at object +0x60.
+- Retail 0x0013D300 can set that word to FFFE (-2) for progress starvation or FFFF (-1) for its output/fullness watchdog.
+
+TDD
+---
+The focused v55 test was run before production changes and failed 5/5 because instrument_jsrf_dirty_disc_probe, jsrf_dirty_disc_probe, the pipeline hook, and the v55 banner did not exist. After the minimal implementation it passed 5/5.
+
+Fresh local verification
+------------------------
+- python -m py_compile scripts/jsrf_xboxrecomp.py: PASS
+- python -m pytest -q tests: 193 passed
+- CMake configure (Ninja, Release): PASS
+- native build: PASS
+- ctest --output-on-failure: 20/20 passed
+
+Windows runtime verification
+----------------------------
+Pending. The next Windows run must identify itself as JSRF Native v55 and emit [DISCDIAG] when the title requests the dirty-disc screen. No claim is made yet about which retail trigger is responsible.
