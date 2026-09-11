@@ -1,0 +1,37 @@
+JSRF Native v60 validation
+
+TDD:
+- new v60 decoder diagnostic tests were run before implementation and failed
+  because instrument_jsrf_adxt_decoder_probe, jsrf_adxt_decoder_probe, the v60
+  pipeline hook, and v60 banner did not yet exist.
+- after implementation the v60 diagnostic suite passes.
+- a separate rate-limit regression was run red before the older ADXT probes were
+  changed, then green after the diagnostic-only rate limiting was added.
+
+Coverage:
+- generated loc_XXXXXXXX blocks in 0013D080..0013D2FF are instrumented.
+- split sub_XXXXXXXX function entries without a redundant loc label are
+  instrumented.
+- 0013D300 and later watchdog code is excluded from the v60 decoder-region
+  injector because it already has the v58 ADXTERR probe.
+- absence of the optional decoder region warns rather than aborting generation.
+- jsrf_adxt_decoder_probe performs guest reads only and rate-limits each site.
+- previous ADXTRING target and ADXTERR error-write logging are rate-limited.
+
+Fresh source-tree verification before packaging:
+- python -m pytest -q: 224 passed
+- python -m py_compile scripts/jsrf_xboxrecomp.py: passed
+- CMake configure/build: passed
+- ctest --test-dir build_verify_v60 --output-on-failure: 20/20 passed
+
+Package-copy verification (first packaged candidate):
+- extracted package Python suite: 224 passed
+- extracted package py_compile: passed
+- extracted package CMake/Ninja build: passed
+- extracted package CTest: 20/20 passed
+- ZIP integrity and required launcher/script/test files: passed
+
+Patch reconstruction:
+- JSRF-v59-HOTFIX2-to-v60.patch applies cleanly to a fresh v59 HOTFIX2 tree.
+- reconstructed tree matches the v60 source tree byte-for-byte for all packaged
+  files (excluding local build/cache metadata).
