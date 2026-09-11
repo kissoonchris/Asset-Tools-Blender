@@ -1,0 +1,48 @@
+JSRF Native v61 validation
+
+TDD:
+- tests/test_v61_adxt_state_machine_boundaries.py was added before production
+  changes and run RED: 4/4 failed because the retail ADXT cluster was not yet
+  pinned/seeded and the runtime banner was still v60.
+- after the boundary/seed/banner change, the focused v61 suite passed 4/4.
+- the full suite initially exposed six historical exact-version banner tests;
+  those were generalized to require a current version >= their own checkpoint.
+
+Root-cause evidence:
+- v60 Windows runtime reaches the retail 0x0013D3F5 ADXT status=-1 write with
+  stall6a=1 while ADXT +0x38 is 60.
+- retail 0x0013D3D2..0x0013D3F5 only reaches that write after +0x6A exceeds
+  5x +0x38 for state 3 or 20x +0x38 otherwise (minimum 301/1201 here).
+- therefore the generated CFG is entering an internal watchdog destination
+  outside the retail branch ownership.
+- v60 ADXTDEC also observes the 0x0013D250 cleanup body but no 0x0013D080
+  state-2 update entry before the error.
+
+Correction:
+- pin retail ADXT function cluster:
+  0013CE30-0013D080
+  0013D080-0013D1A0
+  0013D1A0-0013D210
+  0013D210-0013D250
+  0013D250-0013D300
+  0013D300-0013D470
+  0013D470-0013D4E0
+- seed all seven starts.
+- no ADXT result/status/counter/audio/ring/title state is forced.
+
+Fresh source-tree verification before packaging:
+- python -m pytest -q: 228 passed
+- python -m py_compile scripts/jsrf_xboxrecomp.py: passed
+- CMake/Ninja Release configure/build: passed
+- ctest --test-dir build_verify_v61 --output-on-failure: 20/20 passed
+
+Package-copy verification:
+- extracted package Python suite: 228 passed
+- extracted package py_compile: passed
+- extracted package CMake/Ninja Release build: passed
+- extracted package CTest: 20/20 passed
+
+Patch reconstruction:
+- JSRF-v60-to-v61.patch applies cleanly to a fresh final-v60 package tree.
+- reconstructed packaged file set matches the v61 source tree byte-for-byte,
+  excluding only local build/cache metadata.
