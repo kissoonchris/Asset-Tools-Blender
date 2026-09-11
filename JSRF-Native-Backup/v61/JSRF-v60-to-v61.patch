@@ -1,0 +1,422 @@
+diff --git a/JSRF-V61-MANIFEST.md b/JSRF-V61-MANIFEST.md
+new file mode 100644
+index 0000000..fbe47a7
+--- /dev/null
++++ b/JSRF-V61-MANIFEST.md
+@@ -0,0 +1,24 @@
++# JSRF Native v61
++
++Purpose: correct a retail CRI ADXT state-machine CFG split proven by the v60
++Windows run.
++
++Changes:
++- pins the full retail ADXT cluster `0x0013CE30..0x0013D4E0` as seven adjacent,
++  independently callable functions;
++- prevents internal watchdog destinations `0x0013D3C6` / `0x0013D3F5` from
++  surviving as standalone translated function starts;
++- restores a stable generated entry for the state-2 decoder/output updater
++  `0x0013D080`;
++- adds all seven retail starts to `jsrf_runtime_seeds.json`;
++- keeps the v58-v60 read-only ADXT diagnostics for the next Windows run;
++- updates the runtime banner to `JSRF Native v61`;
++- generalizes historical v55-v60 banner tests so later numbered builds remain
++  valid regression targets.
++
++Why this is a correction rather than a bypass: v60 recorded the retail `-1`
++watchdog write with `stall6a=1` and `+0x38=60`.  The retail instructions can
++only take that write after the counter exceeds 300 (state 3) or 1200 (other
++active states).  Entering it at 1 therefore proves a translated CFG ownership
++error.  v61 changes only function boundaries/seeds; it does not modify the
++retail status/counter/branch logic.
+diff --git a/README.md b/README.md
+index f534e96..0a4f8b4 100644
+--- a/README.md
++++ b/README.md
+@@ -159,3 +159,8 @@ was in the diagnostic source injector, not the game: pinned xboxrecomp emits
+ `add esp, 8` as `esp = esp + 8;`, while the first injector searched only for
+ `esp += 8;`.  HOTFIX1 accepts the real generated form and keeps the probe tied
+ to retail address `0x0013D3C6` without changing guest state.
++
++
++## Current JSRF native checkpoint: v61
++
++v61 pins the retail CRI ADXT state-machine function cluster after v60 proved the generated watchdog could enter the `0x0013D3F5` error write at an impossible counter value. It does not bypass the error; it restores the retail CFG/function ownership and keeps the existing read-only ADXT diagnostics for validation on Windows.
+diff --git a/V61-VALIDATION.txt b/V61-VALIDATION.txt
+new file mode 100644
+index 0000000..b997352
+--- /dev/null
++++ b/V61-VALIDATION.txt
+@@ -0,0 +1,50 @@
++JSRF Native v61 validation
++
++TDD:
++- tests/test_v61_adxt_state_machine_boundaries.py was added before production
++  changes and run RED: 4/4 failed because the retail ADXT cluster was not yet
++  pinned/seeded and the runtime banner was still v60.
++- after the boundary/seed/banner change, the focused v61 suite passed 4/4.
++- the full suite initially exposed six historical exact-version banner tests;
++  those were generalized to require a current version >= their own checkpoint.
++
++Root-cause evidence:
++- v60 Windows runtime reaches the retail 0x0013D3F5 ADXT status=-1 write with
++  stall6a=1 while ADXT +0x38 is 60.
++- retail 0x0013D3D2..0x0013D3F5 only reaches that write after +0x6A exceeds
++  5x +0x38 for state 3 or 20x +0x38 otherwise (minimum 301/1201 here).
++- therefore the generated CFG is entering an internal watchdog destination
++  outside the retail branch ownership.
++- v60 ADXTDEC also observes the 0x0013D250 cleanup body but no 0x0013D080
++  state-2 update entry before the error.
++
++Correction:
++- pin retail ADXT function cluster:
++  0013CE30-0013D080
++  0013D080-0013D1A0
++  0013D1A0-0013D210
++  0013D210-0013D250
++  0013D250-0013D300
++  0013D300-0013D470
++  0013D470-0013D4E0
++- seed all seven starts.
++- no ADXT result/status/counter/audio/ring/title state is forced.
++
++Fresh source-tree verification before packaging:
++- python -m pytest -q: 228 passed
++- python -m py_compile scripts/jsrf_xboxrecomp.py: passed
++- CMake/Ninja Release configure/build: passed
++- ctest --test-dir build_verify_v61 --output-on-failure: 20/20 passed
++
++Final package-copy verification is recorded after packaging below.
++
++Package-copy verification (candidate before final validation text update):
++- extracted package Python suite: 228 passed
++- extracted package py_compile: passed
++- extracted package CMake/Ninja Release build: passed
++- extracted package CTest: 20/20 passed
++
++Patch reconstruction:
++- JSRF-v60-to-v61.patch applies cleanly to a fresh final-v60 package tree.
++- reconstructed packaged file set matches the v61 source tree byte-for-byte,
++  excluding only local build/cache metadata.
+diff --git a/recomp/jsrf_runtime_seeds.json b/recomp/jsrf_runtime_seeds.json
+index ddddc83..1252751 100644
+--- a/recomp/jsrf_runtime_seeds.json
++++ b/recomp/jsrf_runtime_seeds.json
+@@ -55,6 +55,34 @@
+     "start": "0x0013D840",
+     "note": "v56 pass 1 runtime-proven unresolved indirect-call target returning to 0x00140904. The one-click auto-promoter independently accepted it only after the supported retail XBE contained 0x0013D840 as a literal callback pointer in raw-backed executable code. After promotion, v56 pass 2 has no repeat unresolved call/crash and proceeds to open title.adx."
+   },
++  {
++    "start": "0x0013CE30",
++    "note": "v61 retail CRI ADXT state-1 setup/update body; direct call at 0x0013D495, RET/padding delimited through 0x0013D07F."
++  },
++  {
++    "start": "0x0013D080",
++    "note": "v61 retail CRI ADXT state-2 decode/output updater; direct call at 0x0013D4AD, RET/padding delimited through 0x0013D19F."
++  },
++  {
++    "start": "0x0013D1A0",
++    "note": "v61 retail CRI ADXT state-3 updater; direct call at 0x0013D47D, ends at 0x0013D20F."
++  },
++  {
++    "start": "0x0013D210",
++    "note": "v61 retail CRI ADXT state-4 updater; direct call at 0x0013D4C5, RET/padding delimited through 0x0013D24F."
++  },
++  {
++    "start": "0x0013D250",
++    "note": "v61 retail CRI ADXT mode-2 cleanup body; direct calls at 0x0013D415/0x0013D453, tail-jump exit and padding through 0x0013D2FF."
++  },
++  {
++    "start": "0x0013D300",
++    "note": "v61 retail CRI ADXT watchdog/updater; direct calls from dispatcher, one indivisible body through RET/padding before 0x0013D470."
++  },
++  {
++    "start": "0x0013D470",
++    "note": "v61 retail CRI ADXT per-object dispatcher; direct call at 0x0013AA16, RET/padding delimited through 0x0013D4DF."
++  },
+   {
+     "start": "0x0013F9E0",
+     "note": "Retail CRI ADXT ring reserve/copy interface method. v59 HOTFIX2 pins its padding-delimited body; vtable 0x0022DB38 slot +0x18 stores this exact pointer."
+diff --git a/recomp/src/main.c b/recomp/src/main.c
+index 350eb63..5cfa492 100644
+--- a/recomp/src/main.c
++++ b/recomp/src/main.c
+@@ -227,7 +227,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
+         }
+     }
+ 
+-    printf("=== Jet Set Radio Future - static recompilation / JSRF Native v60 ===\n");
++    printf("=== Jet Set Radio Future - static recompilation / JSRF Native v61 ===\n");
+     printf("Game directory: %s\n", game_dir);
+     printf("Retail entry point: 0x%08X\n", JSRF_ENTRY_POINT);
+     printf("Retail title ID: 0x%08X\n", JSRF_TITLE_ID);
+diff --git a/research/JSRF_V61_ADXT_STATE_MACHINE_BOUNDARIES.md b/research/JSRF_V61_ADXT_STATE_MACHINE_BOUNDARIES.md
+new file mode 100644
+index 0000000..e688647
+--- /dev/null
++++ b/research/JSRF_V61_ADXT_STATE_MACHINE_BOUNDARIES.md
+@@ -0,0 +1,55 @@
++# JSRF Native v61 — CRI ADXT state-machine boundary correction
++
++## v60 runtime evidence
++
++The v60 Windows run removes the ambiguity around the title-music failure.
++`title.adx` still reaches the ADXT object at `0x0027D120`, then the retail
++low-output watchdog records status `-1` (`0xFFFF`).  The decisive detail is the
++counter state at the exact retail `0x0013D3F5` write: `stall6a == 1` while
++ADXT `+0x38 == 60`.
++
++That state is impossible in the original retail control flow.  Retail
++`0x0013D3D2..0x0013D3F5` only reaches the `-1` write after `+0x6A` exceeds
++`5 * +0x38` for state 3, or `20 * +0x38` for the other active states.  With
++`+0x38 == 60`, the minimum legal trigger is therefore 301 or 1201, never 1.
++The generated control flow is entering an internal watchdog destination as if
++it were an independent function/block boundary.
++
++v60 also instruments every generated entry/block in the retail
++`0x0013D080..0x0013D2FF` range.  The run observes only the `0x0013D250`
++cleanup body after the error; it never observes the state-2 updater entry
++`0x0013D080`.  Retail dispatcher `0x0013D470` directly calls `0x0013D080` when
++ADXT state byte `+1` is 2, so allowing the detector to merge/split this cluster
++can suppress the actual decode/output update while leaving the watchdog alive.
++
++## Retail XBE boundary proof
++
++The supported retail XBE shows one contiguous CRI ADXT state-machine cluster
++made of seven independent functions:
++
++- `0x0013CE30..0x0013D080` — state-1 setup/update; writes state 2 at `0x13D06C`
++- `0x0013D080..0x0013D1A0` — state-2 decoder/output update
++- `0x0013D1A0..0x0013D210` — state-3 update
++- `0x0013D210..0x0013D250` — state-4 update
++- `0x0013D250..0x0013D300` — mode-2 cleanup
++- `0x0013D300..0x0013D470` — error/progress watchdog
++- `0x0013D470..0x0013D4E0` — per-object state dispatcher
++
++The boundaries are RET/tail-jump plus padding delimited or direct-call delimited.
++The dispatcher has direct calls to the state-specific bodies, and the ADXT task
++loop at `0x0013AA16` directly calls the dispatcher.
++
++## v61 correction
++
++v61 pins all seven measured retail intervals as indivisible function bodies and
++adds their starts to the runtime seed set.  Internal destinations such as
++`0x0013D3C6` and `0x0013D3F5` are removed if generic recovery emitted them as
++standalone function starts.  This restores the retail branch ownership instead
++of bypassing the watchdog or forcing its result.
++
++The existing read-only `[ADXTDEC]`, `[ADXTRING]`, `[ADXTERR]`, and `[DISCDIAG]`
++probes remain available.  With `0x0013D080` pinned, `[ADXTDEC]` can now observe
++the real state-2 updater rather than only the post-error cleanup body.
++
++No ADXT status, counter, ring fill level, file result, audio data, dirty-disc
++branch, or title state is forced by v61.
+diff --git a/scripts/jsrf_xboxrecomp.py b/scripts/jsrf_xboxrecomp.py
+index 89efd9e..98aba0f 100644
+--- a/scripts/jsrf_xboxrecomp.py
++++ b/scripts/jsrf_xboxrecomp.py
+@@ -208,6 +208,22 @@ JSRF_RETAIL_FUNCTION_BOUNDARIES = (
+     {"start": 0x0013B1C0, "end": 0x0013B224, "called_by": 0x0013B330},
+     {"start": 0x0013B230, "end": 0x0013B294, "called_by": 0x0013B330},
+     {"start": 0x0013B2A0, "end": 0x0013B330, "called_by": 0x0013B330},
++    # v61: v60 runtime evidence proves the CRI ADXT watchdog can execute its
++    # retail -1 write with stall6a == 1 even though the retail compare cannot
++    # legally take that branch until the counter exceeds 5x/20x the +0x38
++    # threshold.  The generated updater had been allowed to split at internal
++    # 0x13D3C6/0x13D3F5 blocks, and the mode-2 updater 0x13D080 was not emitted
++    # as a complete observable entry.  The retail XBE shows this whole ADXT
++    # state-machine cluster is a sequence of independent, direct-call,
++    # padding/RET-delimited functions.  Pin every adjacent body so internal
++    # conditional destinations cannot become standalone translated functions.
++    {"start": 0x0013CE30, "end": 0x0013D080, "called_by": 0x0013D495},
++    {"start": 0x0013D080, "end": 0x0013D1A0, "called_by": 0x0013D4AD},
++    {"start": 0x0013D1A0, "end": 0x0013D210, "called_by": 0x0013D47D},
++    {"start": 0x0013D210, "end": 0x0013D250, "called_by": 0x0013D4C5},
++    {"start": 0x0013D250, "end": 0x0013D300, "called_by": 0x0013D415},
++    {"start": 0x0013D300, "end": 0x0013D470, "called_by": 0x0013D486},
++    {"start": 0x0013D470, "end": 0x0013D4E0, "called_by": 0x0013AA16},
+     # v59 HOTFIX2: the CRI ADXT ring interface is a cluster of standalone
+     # vtable-only methods.  The generic detector can merge 0x13FAD0 into its
+     # neighbour because it has no direct-call edge, which made diagnostic-only
+ diff --git a/tests/test_v55_dirty_disc_source_diagnostics.py b/tests/test_v55_dirty_disc_source_diagnostics.py
+index 7c7552c..6cf6a8d 100644
+--- a/tests/test_v55_dirty_disc_source_diagnostics.py
++++ b/tests/test_v55_dirty_disc_source_diagnostics.py
+@@ -88,5 +88,8 @@ def test_v55_pipeline_instruments_after_codegen_before_contract_verification():
+ 
+ 
+ def test_v55_runtime_banner_is_unambiguous():
++    import re
+     main_c = (ROOT / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
+-    assert any(f"JSRF Native v{v}" in main_c for v in (55, 56, 57, 58, 59, 60))
++    match = re.search(r"JSRF Native v(\d+)", main_c)
++    assert match is not None
++    assert int(match.group(1)) >= 55
+diff --git a/tests/test_v56_shared_resource_timeout_diagnostics.py b/tests/test_v56_shared_resource_timeout_diagnostics.py
+index ae3cf97..baf70da 100644
+--- a/tests/test_v56_shared_resource_timeout_diagnostics.py
++++ b/tests/test_v56_shared_resource_timeout_diagnostics.py
+@@ -53,5 +53,8 @@ def test_v56_stops_enabling_old_high_volume_trace_defaults():
+ 
+ 
+ def test_v56_runtime_banner_is_unambiguous():
++    import re
+     main_c = (ROOT / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
+-    assert "JSRF Native v56" in main_c or "JSRF Native v57" in main_c or "JSRF Native v58" in main_c or "JSRF Native v59" in main_c or "JSRF Native v60" in main_c
++    match = re.search(r"JSRF Native v(\d+)", main_c)
++    assert match is not None
++    assert int(match.group(1)) >= 56
+diff --git a/tests/test_v57_title_adx_callback_seed.py b/tests/test_v57_title_adx_callback_seed.py
+index 0cb9dc6..564b06e 100644
+--- a/tests/test_v57_title_adx_callback_seed.py
++++ b/tests/test_v57_title_adx_callback_seed.py
+@@ -31,5 +31,8 @@ def test_v57_disables_legacy_function_trace_printing_by_default_but_keeps_opt_in
+ 
+ 
+ def test_v57_runtime_banner_is_unambiguous():
++    import re
+     main_c = (ROOT / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
+-    assert "JSRF Native v57" in main_c or "JSRF Native v58" in main_c or "JSRF Native v59" in main_c or "JSRF Native v60" in main_c
++    match = re.search(r"JSRF Native v(\d+)", main_c)
++    assert match is not None
++    assert int(match.group(1)) >= 57
+diff --git a/tests/test_v58_adxt_error_watchdog_diagnostics.py b/tests/test_v58_adxt_error_watchdog_diagnostics.py
+index 5086956..66c30fb 100644
+--- a/tests/test_v58_adxt_error_watchdog_diagnostics.py
++++ b/tests/test_v58_adxt_error_watchdog_diagnostics.py
+@@ -92,8 +92,11 @@ def test_v58_pipeline_installs_adxt_probe_before_contract_verification():
+ 
+ 
+ def test_v58_runtime_banner_is_unambiguous():
++    import re
+     main_c = (ROOT / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
+-    assert "JSRF Native v58" in main_c or "JSRF Native v59" in main_c or "JSRF Native v60" in main_c
++    match = re.search(r"JSRF Native v(\d+)", main_c)
++    assert match is not None
++    assert int(match.group(1)) >= 58
+ 
+ 
+ def test_v58_low_output_watchdog_logging_is_rate_limited():
+diff --git a/tests/test_v59_adxt_ring_flow_diagnostics.py b/tests/test_v59_adxt_ring_flow_diagnostics.py
+index 89e8015..4f914b0 100644
+--- a/tests/test_v59_adxt_ring_flow_diagnostics.py
++++ b/tests/test_v59_adxt_ring_flow_diagnostics.py
+@@ -107,8 +107,11 @@ def test_v59_pipeline_installs_ring_probe_before_contract_verification():
+ 
+ 
+ def test_v59_runtime_banner_is_unambiguous():
++    import re
+     main_c = (ROOT / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
+-    assert "JSRF Native v59" in main_c or "JSRF Native v60" in main_c
++    match = re.search(r"JSRF Native v(\d+)", main_c)
++    assert match is not None
++    assert int(match.group(1)) >= 59
+ 
+ 
+ def test_v59_hotfix2_pins_adxt_ring_cluster_when_detector_merged_it(tmp_path):
+diff --git a/tests/test_v60_adxt_decoder_state_diagnostics.py b/tests/test_v60_adxt_decoder_state_diagnostics.py
+index c979be0..13034d9 100644
+--- a/tests/test_v60_adxt_decoder_state_diagnostics.py
++++ b/tests/test_v60_adxt_decoder_state_diagnostics.py
+@@ -113,8 +113,11 @@ def test_v60_pipeline_installs_decoder_probe_before_contract_verification():
+ 
+ 
+ def test_v60_runtime_banner_is_unambiguous():
++    import re
+     main_c = (ROOT / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
+-    assert "JSRF Native v60" in main_c
++    match = re.search(r"JSRF Native v(\d+)", main_c)
++    assert match is not None
++    assert int(match.group(1)) >= 60
+ 
+ 
+ def test_v60_previous_adxt_probes_are_rate_limited_for_long_black_screen_runs():
+diff --git a/tests/test_v61_adxt_state_machine_boundaries.py b/tests/test_v61_adxt_state_machine_boundaries.py
+new file mode 100644
+index 0000000..2272b46
+--- /dev/null
++++ b/tests/test_v61_adxt_state_machine_boundaries.py
+@@ -0,0 +1,84 @@
++import json
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++
++EXPECTED = {
++    0x0013CE30: 0x0013D080,
++    0x0013D080: 0x0013D1A0,
++    0x0013D1A0: 0x0013D210,
++    0x0013D210: 0x0013D250,
++    0x0013D250: 0x0013D300,
++    0x0013D300: 0x0013D470,
++    0x0013D470: 0x0013D4E0,
++}
++
++
++def test_v61_pins_complete_retail_adxt_state_machine_cluster():
++    from scripts.jsrf_xboxrecomp import JSRF_RETAIL_FUNCTION_BOUNDARIES
++
++    actual = {
++        item["start"]: item["end"]
++        for item in JSRF_RETAIL_FUNCTION_BOUNDARIES
++        if item["start"] in EXPECTED
++    }
++    assert actual == EXPECTED
++
++
++def test_v61_boundary_pinner_removes_internal_false_splits(tmp_path):
++    from scripts.jsrf_xboxrecomp import pin_jsrf_function_boundaries
++
++    # Model the failure observed in generated JSRF code: the watchdog body is
++    # split at internal 0x13D3C6/0x13D3F5 blocks and the mode-2 updater is not
++    # represented as its own complete function.
++    functions = [
++        {
++            "start": "0x0013CE30", "end": "0x0013D1A0", "size": 0x370,
++            "name": "sub_0013CE30", "section": ".text", "confidence": 0.5,
++            "num_instructions": 0, "has_prologue": False,
++            "calls_to": [], "called_by": [],
++        },
++        {
++            "start": "0x0013D300", "end": "0x0013D3C6", "size": 0xC6,
++            "name": "sub_0013D300", "section": ".text", "confidence": 0.5,
++            "num_instructions": 0, "has_prologue": False,
++            "calls_to": [], "called_by": [],
++        },
++        {
++            "start": "0x0013D3C6", "end": "0x0013D3F5", "size": 0x2F,
++            "name": "sub_0013D3C6", "section": ".text", "confidence": 0.5,
++            "num_instructions": 0, "has_prologue": False,
++            "calls_to": [], "called_by": [],
++        },
++        {
++            "start": "0x0013D3F5", "end": "0x0013D470", "size": 0x7B,
++            "name": "sub_0013D3F5", "section": ".text", "confidence": 0.5,
++            "num_instructions": 0, "has_prologue": False,
++            "calls_to": [], "called_by": [],
++        },
++    ]
++    path = tmp_path / "functions.json"
++    path.write_text(json.dumps(functions), encoding="utf-8")
++
++    pin_jsrf_function_boundaries(path)
++    out = json.loads(path.read_text(encoding="utf-8"))
++    by_start = {int(item["start"], 16): item for item in out}
++
++    for start, end in EXPECTED.items():
++        assert start in by_start
++        assert int(by_start[start]["end"], 16) == end
++        assert by_start[start]["detection_method"] == "jsrf_retail_boundary"
++
++    assert 0x0013D3C6 not in by_start
++    assert 0x0013D3F5 not in by_start
++
++
++def test_v61_seeds_every_retail_adxt_state_machine_entry():
++    seeds = json.loads((ROOT / "recomp" / "jsrf_runtime_seeds.json").read_text(encoding="utf-8"))
++    starts = {int(item["start"], 16) for item in seeds}
++    assert set(EXPECTED).issubset(starts)
++
++
++def test_v61_banner_is_current():
++    main_c = (ROOT / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
++    assert "JSRF Native v61" in main_c
