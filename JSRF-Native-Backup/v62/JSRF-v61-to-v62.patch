@@ -1,0 +1,363 @@
+diff -ruN jsrf_v61_clean_for_v62/JSRF-V62-MANIFEST.md jsrf_v62_clean/JSRF-V62-MANIFEST.md
+--- jsrf_v61_clean_for_v62/JSRF-V62-MANIFEST.md	1970-01-01 00:00:00.000000000 +0000
++++ jsrf_v62_clean/JSRF-V62-MANIFEST.md	2026-09-11 02:17:19.722607927 +0000
+@@ -0,0 +1,25 @@
++# JSRF Native v62
++
++v62 corrects a generic xboxrecomp EFLAGS provenance bug proven by the v61 JSRF
++runtime capture.
++
++The retail ADXT watchdog reaches its shared `jle` with runtime values `1` and
++`1200`, but the generated branch falls through and writes error `-1`. The pinned
++translator was throwing away CMP provenance at a basic-block merge because the
++two predecessor CMP instructions use different static operands. The lifter then
++used an always-zero `_flags` fallback.
++
++Changes in v62:
++
++- adds `patch_xboxrecomp_merged_cmp_flag_state()` to the one-click pipeline;
++- allows same-setter, same-width CMP/TEST predecessor states to share the
++  runtime `_fa/_fb/_fas/_fbs` snapshot across a CFG merge;
++- preserves the old conservative behavior for incompatible or unknown states;
++- adds v62 regression tests covering the exact differing-CMP merge and refusing
++  mixed-width / mixed-setter merges;
++- updates the runtime banner to `JSRF Native v62`;
++- leaves ADXT data/status, retail watchdog logic, audio ring contents, file I/O,
++  and graphics untouched.
++
++See `research/JSRF_V62_MERGED_CMP_FLAG_STATE.md` for the proof and scope.
+diff -ruN jsrf_v61_clean_for_v62/README.md jsrf_v62_clean/README.md
+--- jsrf_v61_clean_for_v62/README.md	2026-09-11 01:04:26.000000000 +0000
++++ jsrf_v62_clean/README.md	2026-09-11 02:17:19.726607943 +0000
+@@ -1570,3 +1570,12 @@
+ watchdog while `stall6a=1`, proving the generated control flow could enter an
+ internal retail block as if it were a standalone translated function. v61 pins
+ the complete retail ADXT state-machine cluster as seven measured functions.
++
++## v62: merged CMP/TEST EFLAGS provenance
++
++v61 proved the CRI ADXT watchdog was taking a retail-impossible branch: the
++shared signed `jle` fell through with measured operands 1 and 1200. v62 fixes
++the pinned xboxrecomp translator's CFG merge rule so compatible same-width
++CMP/TEST predecessors retain their already-emitted runtime flag snapshots.
++This is a translator correctness fix; it does not bypass the ADXT error or alter
++retail watchdog thresholds.
+diff -ruN jsrf_v61_clean_for_v62/V62-VALIDATION.txt jsrf_v62_clean/V62-VALIDATION.txt
+--- jsrf_v61_clean_for_v62/V62-VALIDATION.txt	1970-01-01 00:00:00.000000000 +0000
++++ jsrf_v62_clean/V62-VALIDATION.txt	2026-09-11 02:20:39.463035239 +0000
+@@ -0,0 +1,20 @@
++JSRF Native v62 validation
++
++Implementation scope
++--------------------
++- Corrects the pinned xboxrecomp translator's basic-block flag-state merge for
++  compatible same-width CMP/TEST predecessors.
++- Uses the runtime CMP/TEST snapshots already emitted by the lifter.
++- Does not force JSRF ADXT status, watchdog values, decoded data, ring progress,
++  file I/O results, title state, or graphics output.
++
++Regression verification
++-----------------------
++- v62 focused regression suite: 5 passed.
++- full Python suite: 233 passed.
++- scripts/jsrf_xboxrecomp.py py_compile: passed.
++- native root CMake configure/build: passed.
++- native CTest: 20/20 passed.
++
++The distributable ZIP is additionally re-extracted and the same Python/native
++checks are rerun before release.
+diff -ruN jsrf_v61_clean_for_v62/recomp/src/main.c jsrf_v62_clean/recomp/src/main.c
+--- jsrf_v61_clean_for_v62/recomp/src/main.c	2026-09-11 01:03:31.000000000 +0000
++++ jsrf_v62_clean/recomp/src/main.c	2026-09-11 02:13:38.179517454 +0000
+@@ -227,7 +227,7 @@
+ int main(int argc, char **argv)
+ {
+-    printf("=== Jet Set Radio Future - static recompilation / JSRF Native v61 ===\n");
++    printf("=== Jet Set Radio Future - static recompilation / JSRF Native v62 ===\n");
+     (void)argc;
+     (void)argv;
+     return WinMain(GetModuleHandleA(NULL), NULL, GetCommandLineA(), SW_SHOW);
+diff -ruN jsrf_v61_clean_for_v62/research/JSRF_V62_MERGED_CMP_FLAG_STATE.md jsrf_v62_clean/research/JSRF_V62_MERGED_CMP_FLAG_STATE.md
+--- jsrf_v61_clean_for_v62/research/JSRF_V62_MERGED_CMP_FLAG_STATE.md	1970-01-01 00:00:00.000000000 +0000
++++ jsrf_v62_clean/research/JSRF_V62_MERGED_CMP_FLAG_STATE.md	2026-09-11 02:17:19.718607911 +0000
+@@ -0,0 +1,53 @@
++# JSRF Native v62 — merged CMP flag-state correction
++
++## Runtime proof from v61
++
++The v61 Windows capture reaches the same CRI ADXT watchdog in retail function
++`0x0013D300`. Immediately before the error write, the output-availability call
++returns below `0x40`, so retail increments watchdog word `ADXT+0x6A` from 0 to 1.
++The diagnostic at `0x0013D3F5` then records:
++
++- `stall6a = 1`
++- base threshold `ADXT+0x38 = 60`
++- mode/state byte `ADXT+0x6D = 2`
++- `edx = 1`
++- `ecx = 0x000004B0` (1200)
++
++For state != 3, the retail instructions at `0x0013D3E8..0x0013D3F3` compute
++`ecx = threshold * 20`, load the signed watchdog count into `edx`, execute
++`cmp edx, ecx`, then `jle 0x0013D3FB`. With the measured values, `1 <= 1200`
++is true. Retail execution therefore cannot fall through to the `mov word
++[esi+0x60], 0xffff` at `0x0013D3F5` on that first watchdog increment.
++
++## Translator defect
++
++The pinned xboxrecomp translator propagates a Python `flag_state` tuple between
++basic blocks. At a CFG merge it keeps that state only when every predecessor's
++static tuple is exactly identical. The shared JLE at retail `0x0013D3F3` has two
++legitimate predecessors:
++
++- state 3: `cmp eax, edx`
++- other states: `cmp edx, ecx`
++
++Those tuples differ, so the translator discards the incoming state. The lifter's
++standalone-Jcc fallback then tests local `_flags`, which is initialized to zero
++and is not populated by ordinary CMP. The generated JLE is consequently false
++regardless of the runtime operands. That exactly matches the v61 observation.
++
++## v62 correction
++
++`patch_xboxrecomp_merged_cmp_flag_state()` changes the pinned translator's merge
++rule only for compatible runtime snapshots:
++
++- all incoming states must be CMP or all must be TEST;
++- all must have the same operand width;
++- every predecessor still has to have a known outgoing state.
++
++CMP/TEST already emit `_fa/_fb/_fas/_fbs` at the point they execute. Therefore
++at runtime those locals contain the operands from the predecessor that was
++actually taken. Keeping a representative CMP/TEST provenance at the merge lets
++`_make_condition()` consume those runtime snapshots instead of the dead
++`_flags` fallback. Different setters, different widths, unknown predecessors,
++and back-edge uncertainty retain the previous conservative behavior.
++
++This is a generic xboxrecomp control-flow correction. It does not modify JSRF's
++ADXT status, watchdog count, threshold, decoded samples, ring accounting, file
++I/O results, title state, or graphics output.
+diff -ruN jsrf_v61_clean_for_v62/scripts/jsrf_xboxrecomp.py jsrf_v62_clean/scripts/jsrf_xboxrecomp.py
+--- jsrf_v61_clean_for_v62/scripts/jsrf_xboxrecomp.py	2026-09-11 01:03:31.000000000 +0000
++++ jsrf_v62_clean/scripts/jsrf_xboxrecomp.py	2026-09-11 02:13:38.179517454 +0000
+@@ -2591,6 +2591,105 @@
+     path.write_text(text.replace(old, new, 1), encoding="utf-8")
+ 
++
++def patch_xboxrecomp_merged_cmp_flag_state(toolkit_dir: str | Path) -> None:
++    """Preserve runtime CMP/TEST snapshots across compatible CFG merges.
++
++    The pinned translator carries flag provenance as a Python tuple describing
++    the static instruction that last set EFLAGS.  At a basic-block merge it
++    currently requires every predecessor tuple to be *identical*.  That is too
++    strict for ordinary x86 control flow: two predecessors can each execute a
++    different 32-bit CMP and then join at one Jcc.  The generated function has
++    already emitted the runtime `_fa/_fb/_fas/_fbs` snapshot for whichever CMP
++    actually executed, but the translator discards the provenance at the join
++    and falls back to `_flags`, which is initialized to zero and is not an x86
++    EFLAGS register.
++
++    JSRF's retail ADXT watchdog is exactly this shape at 0x0013D3F3: state 3
++    reaches the shared JLE after `cmp eax, edx`; the other states reach it after
++    `cmp edx, ecx`.  v61 measured edx=1 and ecx=1200 immediately before that
++    JLE, yet the branch was not taken and retail error -1 was written.
++
++    Merge only CMP/TEST states of the same operand width.  The representative
++    static operands are used only to tell `_make_condition` the setter kind and
++    width; the condition itself reads the runtime snapshot left by the taken
++    predecessor.  Incompatible setters or widths retain the old conservative
++    `incoming = None` behavior.
++    """
++    import re
++
++    toolkit_dir = Path(toolkit_dir)
++    path = toolkit_dir / "tools" / "recomp" / "translator.py"
++    if not path.is_file():
++        raise FileNotFoundError(f"xboxrecomp translator was not found: {path}")
++
++    text = path.read_text(encoding="utf-8")
++    marker = "# JSRF v62: merge compatible runtime cmp/test snapshots"
++    if marker in text:
++        return
++
++    pattern = re.compile(
++        r'(?m)^(?P<i>\s*)elif all\(p in out_state for p in sources\):\n'
++        r'(?P=i)    states = \[out_state\[p\] for p in sources\]\n'
++        r'(?P=i)    incoming = states\[0\]\n'
++        r'(?P=i)    for other in states\[1:\]:\n'
++        r'(?P=i)        if other != incoming:\n'
++        r'(?P=i)            incoming = None\n'
++        r'(?P=i)            break\n'
++    )
++    match = pattern.search(text)
++    if not match:
++        raise RuntimeError(
++            "Pinned xboxrecomp flag-state merge no longer matches translator.py"
++        )
++
++    i = match.group("i")
++    replacement = (
++        i + "elif all(p in out_state for p in sources):\n"
++        + i + "    states = [out_state[p] for p in sources]\n"
++        + i + "    incoming = states[0]\n"
++        + i + "    if any(other != incoming for other in states[1:]):\n"
++        + i + "        " + marker + "\n"
++        + i + "        _snapshot_keys = []\n"
++        + i + "        for state in states:\n"
++        + i + "            if (not state or state[0] not in (\"cmp\", \"test\")\n"
++        + i + "                    or len(state[1]) < 2):\n"
++        + i + "                _snapshot_keys = []\n"
++        + i + "                break\n"
++        + i + "            _width = None\n"
++        + i + "            for _op in state[1][:2]:\n"
++        + i + "                if getattr(_op, \"type\", None) == \"mem\":\n"
++        + i + "                    _width = getattr(_op, \"mem_size\", None) or 4\n"
++        + i + "                    break\n"
++        + i + "                if getattr(_op, \"type\", None) == \"reg\":\n"
++        + i + "                    _reg = str(getattr(_op, \"reg\", \"\") or \"\").lower()\n"
++        + i + "                    if _reg in (\"al\", \"ah\", \"bl\", \"bh\", \"cl\", \"ch\", \"dl\", \"dh\"):\n"
++        + i + "                        _width = 1\n"
++        + i + "                    elif _reg in (\"ax\", \"bx\", \"cx\", \"dx\", \"si\", \"di\", \"bp\", \"sp\"):\n"
++        + i + "                        _width = 2\n"
++        + i + "                    else:\n"
++        + i + "                        _width = 4\n"
++        + i + "                    break\n"
++        + i + "            _snapshot_keys.append((state[0], _width or 4))\n"
++        + i + "        if (_snapshot_keys\n"
++        + i + "                and len(set(_snapshot_keys)) == 1):\n"
++        + i + "            incoming = states[0]  # runtime _fa/_fb contain the taken predecessor\n"
++        + i + "        else:\n"
++        + i + "            incoming = None\n"
++    )
++
++    text = text[:match.start()] + replacement + text[match.end():]
++    path.write_text(text, encoding="utf-8")
++
+ def report_jsrf_post_cache_cfg_boundaries(functions_path: str | Path) -> None:
+@@ -4044,6 +4143,7 @@
+     patch_xboxrecomp_lock_xadd_flags(toolkit_dir)
+     patch_xboxrecomp_fcmov_flags(toolkit_dir)
+     patch_xboxrecomp_repeated_string_compare_flags(toolkit_dir)
++    patch_xboxrecomp_merged_cmp_flag_state(toolkit_dir)
+     patch_xboxrecomp_guest_heap_thread_safety(toolkit_dir)
+     patch_xboxrecomp_ntfreevirtualmemory_guest_bridge(toolkit_dir)
+     patch_xboxrecomp_kernel_dispatch_tls(toolkit_dir)
+diff -ruN jsrf_v61_clean_for_v62/tests/test_v61_adxt_state_machine_boundaries.py jsrf_v62_clean/tests/test_v61_adxt_state_machine_boundaries.py
+--- jsrf_v61_clean_for_v62/tests/test_v61_adxt_state_machine_boundaries.py	2026-09-11 01:03:31.000000000 +0000
++++ jsrf_v62_clean/tests/test_v61_adxt_state_machine_boundaries.py	2026-09-11 02:14:09.839894637 +0000
+@@ -79,6 +79,6 @@
+     assert set(EXPECTED).issubset(starts)
+ 
+ 
+-def test_v61_banner_is_current():
++def test_v61_or_later_banner_remains_unambiguous():
+     main_c = (ROOT / "recomp" / "src" / "main.c").read_text(encoding="utf-8")
+-    assert "JSRF Native v61" in main_c
++    assert main_c.count("JSRF Native v") == 1
+diff -ruN jsrf_v61_clean_for_v62/tests/test_v62_merged_cmp_flag_state.py jsrf_v62_clean/tests/test_v62_merged_cmp_flag_state.py
+--- jsrf_v61_clean_for_v62/tests/test_v62_merged_cmp_flag_state.py	1970-01-01 00:00:00.000000000 +0000
++++ jsrf_v62_clean/tests/test_v62_merged_cmp_flag_state.py	2026-09-11 02:13:23.867342543 +0000
+@@ -0,0 +1,104 @@
++from pathlib import Path
++
++
++def _write_pinned_translator_fixture(path: Path) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(
++        '''# pinned xboxrecomp translator merge fragment\n'''
++        '''def translate(blocks, preds, out_state):\n'''
++        '''    results = []\n'''
++        '''    for bb in blocks:\n'''
++        '''        sources = preds[bb.start]\n'''
++        '''        if bb.start == 0 or not sources:\n'''
++        '''            incoming = None\n'''
++        '''        elif all(p in out_state for p in sources):\n'''
++        '''            states = [out_state[p] for p in sources]\n'''
++        '''            incoming = states[0]\n'''
++        '''            for other in states[1:]:\n'''
++        '''                if other != incoming:\n'''
++        '''                    incoming = None\n'''
++        '''                    break\n'''
++        '''        else:\n'''
++        '''            incoming = None\n'''
++        '''        results.append(incoming)\n'''
++        '''    return results\n''',
++        encoding='utf-8',
++    )
++
++
++def test_v62_patches_differing_same_width_cmp_predecessors(tmp_path):
++    from scripts.jsrf_xboxrecomp import patch_xboxrecomp_merged_cmp_flag_state
++
++    translator = tmp_path / 'tools' / 'recomp' / 'translator.py'
++    _write_pinned_translator_fixture(translator)
++
++    patch_xboxrecomp_merged_cmp_flag_state(tmp_path)
++    text = translator.read_text(encoding='utf-8')
++
++    assert 'JSRF v62: merge compatible runtime cmp/test snapshots' in text
++    assert 'state[0] not in ("cmp", "test")' in text
++    assert 'len(set(_snapshot_keys)) == 1' in text
++    assert 'incoming = states[0]  # runtime _fa/_fb contain the taken predecessor' in text
++
++
++def test_v62_patch_is_idempotent(tmp_path):
++    from scripts.jsrf_xboxrecomp import patch_xboxrecomp_merged_cmp_flag_state
++
++    translator = tmp_path / 'tools' / 'recomp' / 'translator.py'
++    _write_pinned_translator_fixture(translator)
++    patch_xboxrecomp_merged_cmp_flag_state(tmp_path)
++    once = translator.read_text(encoding='utf-8')
++    patch_xboxrecomp_merged_cmp_flag_state(tmp_path)
++    twice = translator.read_text(encoding='utf-8')
++    assert twice == once
++
++
++
++def test_v62_patched_merge_uses_runtime_snapshot_only_for_compatible_states(tmp_path):
++    from types import SimpleNamespace
++    from scripts.jsrf_xboxrecomp import patch_xboxrecomp_merged_cmp_flag_state
++
++    translator = tmp_path / "tools" / "recomp" / "translator.py"
++    _write_pinned_translator_fixture(translator)
++    patch_xboxrecomp_merged_cmp_flag_state(tmp_path)
++
++    ns = {}
++    exec(compile(translator.read_text(encoding="utf-8"), str(translator), "exec"), ns)
++    bb = SimpleNamespace(start=1)
++    r32a = SimpleNamespace(type="reg", reg="eax")
++    r32b = SimpleNamespace(type="reg", reg="edx")
++    r32c = SimpleNamespace(type="reg", reg="ecx")
++    r16 = SimpleNamespace(type="reg", reg="ax")
++
++    merged = ns["translate"](
++        [bb], {1: {10, 20}},
++        {10: ("cmp", [r32a, r32b]), 20: ("cmp", [r32b, r32c])},
++    )[0]
++    assert merged is not None and merged[0] == "cmp"
++
++    mixed_width = ns["translate"](
++        [bb], {1: {10, 20}},
++        {10: ("cmp", [r32a, r32b]), 20: ("cmp", [r16, r16])},
++    )[0]
++    assert mixed_width is None
++
++    mixed_setter = ns["translate"](
++        [bb], {1: {10, 20}},
++        {10: ("cmp", [r32a, r32b]), 20: ("test", [r32b, r32c])},
++    )[0]
++    assert mixed_setter is None
++
++
++def test_v62_pipeline_applies_flag_merge_patch_before_recompilation():
++    import inspect
++    from scripts import jsrf_xboxrecomp
++
++    src = inspect.getsource(jsrf_xboxrecomp.run_pipeline)
++    assert 'patch_xboxrecomp_merged_cmp_flag_state(toolkit_dir)' in src
++    assert src.index('patch_xboxrecomp_merged_cmp_flag_state(toolkit_dir)') < src.index('commands = build_pipeline_commands')
++
++
++def test_v62_banner_is_current():
++    root = Path(__file__).resolve().parents[1]
++    main_c = (root / 'recomp' / 'src' / 'main.c').read_text(encoding='utf-8')
++    assert 'JSRF Native v62' in main_c
